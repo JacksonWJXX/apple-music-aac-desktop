@@ -128,7 +128,7 @@ Get-Content (Join-Path $state 'queue-ui-results.json')
 
 页面和登录指引使用应用内小步滚动。正常行滚动按系统设置的行数计算，每行 8 个逻辑像素；例如系统设为 3 行、150% 缩放时，一个刻度移动 36 像素。高精度滚轮按实际 delta 比例积累，不需要凑齐一个刻度后才跳动。系统设置为不滚动或整页滚动时分别遵守；不修改 Windows 的全局滚轮或缩放设置。
 
-动画仅有一个当前目标，快速输入合并，反向输入取消旧方向，边界不积压额外位移。系统关闭客户端动画时直接应用小步位移；正常动画结束后计时器停止。滚动条拖动、焦点导航和窗口调整会终止旧动画。多行输入和队列保留原生滚动，外层不会再次处理它们转发的滚轮，不改变输入内容或焦点。
+动画仅有一个当前目标，快速输入合并，反向输入取消旧方向，边界不积压额外位移。系统关闭客户端动画时直接应用小步位移；正常动画结束后计时器停止。滚动条拖动、焦点导航和窗口调整会终止旧动画。多行输入和队列有内容可滚时优先原生滚动；空白、内容较少或到该方向的边缘时，转交给外层平滑滚动，不重复消费，不改变输入内容、选择或焦点。
 
 维护测试（接续上方 `$csc` 和 `$refs`）：
 
@@ -145,3 +145,23 @@ Get-Content (Join-Path $state 'scroll-probe.json')
 滚动界面测试只创建独立合成状态窗口，向它自己拥有的控件发送消息，记录位移、计时器、CPU 和原生重绘计数；不模拟全局鼠标，不读取真实登录，不调用 Apple。测试拒绝已有非空状态目录。跨 DPI 部分是对测试窗口发送 DPI 消息的模拟，真实屏幕 DPI 另行记录，不等同于真实多显示器验证。系统动画关闭和整页/零行偏好由纯模型测试与分支检查覆盖，不为测试更改系统设置。实际显示流畅程度仍需要用户设备体验确认。
 
 API semantics: [MouseWheel event](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.control.mousewheel), [system wheel preference](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.systeminformation.mousewheelscrolllines), [read-only client animation query](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfow). The smaller logical line size and target interpolation are application choices.
+
+## 输入区与队列的滚动链
+
+鼠标停在空输入或空队列上时也能滚动页面。长内容在当前方向还有空间时先在控件内部滚动；到边缘后再交给页面。多刻度消息只把未被内部消费的部分交给外层一次。内层可滚时先累积普通高精度 delta，再交给原生控件完整刻度，避免隐藏缓存；交给外层的部分继续按比例平滑滚动；到边缘时交接剩余部分。反向、修改内容、改变视口或切换滚动归属会取消旧的未执行意图，避免回头时卡住或突然补滚。
+
+Ctrl、Shift、Alt 或鼠标按键修饰的消息保持原生控件处理，不强行转为页面竖向滚动。只对应用自己的普通链接输入和队列安装控件内消息处理，不使用全局鼠标钩子，不接管登录密码框、浏览器或其他窗口。
+
+维护测试（同上 `$csc`、`$refs`）：
+
+```powershell
+& $csc /nologo /target:exe /codepage:65001 /main:WheelChainModelTests /out:tests/WheelChainModelTests.exe $refs AppleMusicTool.cs tests/WheelChainModelTests.cs
+& .\tests\WheelChainModelTests.exe
+& $csc /nologo /target:exe /codepage:65001 /win32manifest:app.manifest /out:tests/WheelChainUiTests.exe $refs tests/WheelChainUiTests.cs
+Copy-Item App.config tests/WheelChainUiTests.exe.config
+$state = Join-Path $env:TEMP ('AppleMusicWheelChainTests-' + [guid]::NewGuid().ToString('N'))
+& .\tests\WheelChainUiTests.exe .\AppleMusicAAC.exe $state
+Get-Content (Join-Path $state 'wheel-chain-results.json')
+```
+
+界面测试使用独立合成内容和自己的窗口消息，覆盖空/短/长输入、两端、正反向、小 delta、队列、选择与焦点、修饰键消息位、控件句柄重建和页面边界；数字断言基于系统设置为每刻度 3 行，其他设置会报告失败，不为测试改动系统。修饰键是消息标志测试，不向全局键盘注入按键。真实硬件手感仍需体验确认。

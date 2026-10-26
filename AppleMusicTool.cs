@@ -63,12 +63,26 @@ internal sealed class ScrollMotion {
     public int Finish(){Position=Target;return (int)Math.Round(Position,MidpointRounding.AwayFromZero);}
 }
 
+// Keep partial normal-wheel deltas out of the native control's hidden cache so
+// a boundary hand-off cannot leave stale native input for a later direction.
+internal sealed class WheelRemainder {
+    public int Pending {get;private set;}
+    public void Reset(){Pending=0;}
+    private int Combine(int delta){if(delta==0)return Pending;if(Pending!=0&&Math.Sign(Pending)!=Math.Sign(delta))Pending=0;return Pending+delta;}
+    public int Native(int delta){int sum=Combine(delta),whole=sum/120*120;Pending=sum-whole;return whole;}
+    public int Outer(int delta){int sum=Combine(delta);Pending=0;return sum;}
+    public int Drain(){int value=Pending;Pending=0;return value;}
+}
+
 internal sealed class SmoothScrollPanel : Panel {
     private readonly ScrollMotion motion=new ScrollMotion();
     private readonly Stopwatch elapsed=new Stopwatch();
     private readonly System.Windows.Forms.Timer animation;
     private int rendered=-1;
     private bool applying;
+    private int nativeDispatchDepth;
+    private readonly Dictionary<Control,NativeScroller> scrollers=new Dictionary<Control,NativeScroller>();
+    private NativeScroller nativeOwner;
     public int AnimationTicks {get;private set;}
     public bool AnimationRunning {get{return animation!=null&&animation.Enabled;}}
     [DllImport("user32.dll",EntryPoint="SystemParametersInfoW")]
@@ -85,23 +99,87 @@ internal sealed class SmoothScrollPanel : Panel {
         AnimationTicks++;double dt=elapsed.Elapsed.TotalMilliseconds;elapsed.Restart();Render(motion.Advance(dt,MaximumOffset));
         if(!motion.Moving){animation.Stop();elapsed.Reset();}
     }
-    private bool OverNativeScroller(Point screen){
+    private NativeScroller NativeAt(Point screen){
         Control parent=this;
-        while(true){Control child=parent.GetChildAtPoint(parent.PointToClient(screen),GetChildAtPointSkip.Invisible);if(child==null)return false;if(child is TextBoxBase||child is ListView)return true;parent=child;}
+        while(true){Control child=parent.GetChildAtPoint(parent.PointToClient(screen),GetChildAtPointSkip.Invisible);if(child==null)return null;NativeScroller scroller;if(scrollers.TryGetValue(child,out scroller))return scroller;parent=child;}
+    }
+    public void RegisterNativeScroller(Control control){
+        TextBox text=control as TextBox;
+        if(!Contains(control)||(!(control is ListView)&&(text==null||!text.Multiline||text.UseSystemPasswordChar||text.PasswordChar!='\0')))throw new ArgumentException("scroller");
+        if(!scrollers.ContainsKey(control))scrollers.Add(control,new NativeScroller(this,control));
+    }
+    private void SelectOuter(){if(nativeOwner!=null){nativeOwner.Reset();nativeOwner=null;}}
+    private void SelectNative(NativeScroller scroller){if(nativeOwner!=scroller){if(nativeOwner!=null)nativeOwner.Reset();scroller.Reset();nativeOwner=scroller;}StopAndSync();}
+    private void ApplyWheel(int delta){
+        if(delta==0)return;SelectOuter();if(rendered<0||Math.Max(0,-AutoScrollPosition.Y)!=rendered)StopAndSync();
+        int lines=SystemInformation.MouseWheelScrollLines;if(lines==0){StopAndSync();return;}
+        bool animate=animation.Enabled||AnimationAllowed();Form owner=FindForm();motion.Wheel(delta,owner==null?DeviceDpi:owner.DeviceDpi,lines,ClientSize.Height,MaximumOffset);
+        if(!animate)Render(motion.Finish());else if(motion.Moving&&!animation.Enabled){elapsed.Restart();animation.Start();}
+    }
+    private sealed class NativeScroller:NativeWindow,IDisposable {
+        [StructLayout(LayoutKind.Sequential)]private struct ScrollInfo{public uint Size,Mask;public int Min,Max;public uint Page;public int Position,Track;}
+        [DllImport("user32.dll")][return:MarshalAs(UnmanagedType.Bool)]private static extern bool GetScrollInfo(IntPtr window,int bar,ref ScrollInfo info);
+        [DllImport("user32.dll")]private static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr w,IntPtr l);
+        private readonly SmoothScrollPanel owner;private readonly Control control;private readonly WheelRemainder pending=new WheelRemainder();
+        private bool disposed,knownPosition;private int lastPosition,lastMin,lastMax;private uint lastPage;
+        public NativeScroller(SmoothScrollPanel panel,Control child){owner=panel;control=child;control.HandleCreated+=Created;control.HandleDestroyed+=Destroyed;control.TextChanged+=Changed;control.SizeChanged+=Changed;control.Disposed+=Closed;if(control.IsHandleCreated)AssignHandle(control.Handle);}
+        private void Created(object sender,EventArgs args){Reset();if(Handle==IntPtr.Zero)AssignHandle(control.Handle);}
+        private void Destroyed(object sender,EventArgs args){Reset();if(Handle!=IntPtr.Zero)ReleaseHandle();}
+        private void Changed(object sender,EventArgs args){Reset();}
+        private void Closed(object sender,EventArgs args){Dispose();}
+        public void Reset(){pending.Reset();knownPosition=false;}
+        private bool CanScroll(int delta){
+            ListView list=control as ListView;
+            if(list!=null&&Handle!=IntPtr.Zero){
+                // A recreated native ListView can expose a placeholder scrollbar
+                // range (0..100, page 0) even with no rows. Query its real rows.
+                int count=list.Items.Count,top=Math.Max(0,SendMessage(Handle,0x1027,IntPtr.Zero,IntPtr.Zero).ToInt32());
+                uint page=(uint)Math.Max(1,SendMessage(Handle,0x1028,IntPtr.Zero,IntPtr.Zero).ToInt32());
+                if(knownPosition&&(lastPosition!=top||lastMax!=count||lastPage!=page))pending.Reset();lastPosition=top;lastMin=0;lastMax=count;lastPage=page;knownPosition=true;
+                return delta<0?top+(long)page<count:delta>0&&top>0;
+            }
+            var info=new ScrollInfo{Size=(uint)Marshal.SizeOf(typeof(ScrollInfo)),Mask=7};
+            if(Handle==IntPtr.Zero||!GetScrollInfo(Handle,1,ref info)){Reset();return false;}
+            if(knownPosition&&(lastPosition!=info.Position||lastMin!=info.Min||lastMax!=info.Max||lastPage!=info.Page))pending.Reset();lastPosition=info.Position;lastMin=info.Min;lastMax=info.Max;lastPage=info.Page;knownPosition=true;
+            int maximum=Math.Max(info.Min,info.Max-(int)Math.Max(0L,(long)info.Page-1));
+            return delta<0?info.Position<maximum:delta>0&&info.Position>info.Min;
+        }
+        public IntPtr Dispatch(Message message){return SendMessage(control.Handle,(uint)message.Msg,message.WParam,message.LParam);}
+        protected override void WndProc(ref Message message){
+            if(message.Msg==0x020A){
+                int delta=(short)((message.WParam.ToInt64()>>16)&0xffff);int flags=(int)(message.WParam.ToInt64()&0xffff);if(delta==0){message.Result=IntPtr.Zero;return;}
+                // Keep native modified-wheel/drag semantics and all original bits.
+                if(flags!=0||(Control.ModifierKeys&Keys.Alt)!=0){owner.SelectNative(this);Reset();owner.nativeDispatchDepth++;try{base.WndProc(ref message);}finally{owner.nativeDispatchDepth--;}return;}
+                bool canScroll=CanScroll(delta);
+                if(!canScroll){int outgoing=pending.Outer(delta);owner.ApplyWheel(outgoing);message.Result=IntPtr.Zero;return;}
+                owner.SelectNative(this);int whole=pending.Native(delta);
+                if(whole==0){message.Result=IntPtr.Zero;return;}
+                IntPtr original=message.WParam;int remaining=whole;
+                try{
+                    // A packet can contain several notches. Consume only the
+                    // notches that fit inside, then hand the remainder out once.
+                    while(remaining!=0){
+                        int part=Math.Sign(remaining)*120;message.WParam=new IntPtr((part<<16)|flags);owner.nativeDispatchDepth++;
+                        try{base.WndProc(ref message);}finally{owner.nativeDispatchDepth--;}
+                        remaining-=part;knownPosition=false;
+                        if(!CanScroll(delta)){int outgoing=remaining+pending.Drain();if(outgoing!=0)owner.ApplyWheel(outgoing);break;}
+                    }
+                }finally{message.WParam=original;}
+                return;
+            }
+            if(owner.nativeDispatchDepth==0&&(message.Msg==0x0115||message.Msg==0x0114||message.Msg==0x0100||message.Msg==0x00B6||message.Msg==0x00B7))Reset();
+            base.WndProc(ref message);
+        }
+        public void Dispose(){if(disposed)return;disposed=true;control.HandleCreated-=Created;control.HandleDestroyed-=Destroyed;control.TextChanged-=Changed;control.SizeChanged-=Changed;control.Disposed-=Closed;if(Handle!=IntPtr.Zero)ReleaseHandle();Reset();}
     }
     protected override void WndProc(ref Message message){
-        if(message.Msg==0x020A&&VerticalScroll.Visible){
+        if(message.Msg==0x020A){
+            if(nativeDispatchDepth>0){message.Result=IntPtr.Zero;return;}
             long point=message.LParam.ToInt64();Point screen=new Point((short)(point&0xffff),(short)((point>>16)&0xffff));
-            // Native edit/list controls keep their own wheel handling, including
-            // at their boundaries; never redirect or process a bubbled copy twice.
-            if(OverNativeScroller(screen)){message.Result=IntPtr.Zero;return;}
-            if(rendered<0||Math.Max(0,-AutoScrollPosition.Y)!=rendered)StopAndSync();
+            NativeScroller scroller=NativeAt(screen);if(scroller!=null){message.Result=scroller.Dispatch(message);return;}
+            if(!VerticalScroll.Visible){base.WndProc(ref message);return;}
             int delta=(short)((message.WParam.ToInt64()>>16)&0xffff);
-            int lines=SystemInformation.MouseWheelScrollLines;
-            if(lines==0){StopAndSync();message.Result=IntPtr.Zero;return;}
-            bool animate=animation.Enabled||AnimationAllowed();Form owner=FindForm();motion.Wheel(delta,owner==null?DeviceDpi:owner.DeviceDpi,lines,ClientSize.Height,MaximumOffset);
-            if(!animate){Render(motion.Finish());}
-            else if(motion.Moving&&!animation.Enabled){elapsed.Restart();animation.Start();}
+            ApplyWheel(delta);
             message.Result=IntPtr.Zero;return; // do not invoke default AutoScroll again
         }
         if(message.Msg==0x0115||message.Msg==0x0114)StopAndSync();
@@ -110,7 +188,7 @@ internal sealed class SmoothScrollPanel : Panel {
     protected override void OnScroll(ScrollEventArgs args){if(!applying)StopAndSync();base.OnScroll(args);}
     protected override void OnClientSizeChanged(EventArgs args){if(animation!=null)StopAndSync();base.OnClientSizeChanged(args);}
     protected override void OnVisibleChanged(EventArgs args){if(animation!=null&&!Visible)StopAndSync();base.OnVisibleChanged(args);}
-    protected override void Dispose(bool disposing){if(disposing&&animation!=null){animation.Stop();animation.Dispose();}base.Dispose(disposing);}
+    protected override void Dispose(bool disposing){if(disposing&&animation!=null){animation.Stop();animation.Dispose();foreach(var scroller in scrollers.Values)scroller.Dispose();scrollers.Clear();}base.Dispose(disposing);}
 }
 
 internal sealed class BusyGate {
@@ -394,6 +472,7 @@ internal sealed class MainWindow : Form {
         progress=new ProgressBar();progress.Dock=DockStyle.Fill;progress.Margin=new Padding(0,3,8,3);progress.Style=ProgressBarStyle.Continuous;meter.Controls.Add(progress,0,0);
         progressPercent=new Label();progressPercent.AutoSize=true;progressPercent.Text="—";progressPercent.Margin=Padding.Empty;progressPercent.Dock=DockStyle.Fill;progressPercent.TextAlign=ContentAlignment.MiddleRight;meter.Controls.Add(progressPercent,1,0);
         detail=new Label();detail.Text="每项只接受一首歌；读取信息时不显示虚假百分比。";detail.AutoSize=true;detail.MaximumSize=new Size(10000,0);detail.Dock=DockStyle.Fill;detail.Margin=new Padding(0,4,0,4);detail.AutoEllipsis=true;detail.TextAlign=ContentAlignment.MiddleLeft;detail.ForeColor=Color.FromArgb(103,108,95);footerSurface.Controls.Add(detail,0,2);
+        ((SmoothScrollPanel)bodySurface).RegisterNativeScroller(link);((SmoothScrollPanel)bodySurface).RegisterNativeScroller(queueView);
         bodySurface.ClientSizeChanged+=delegate{content.Width=Math.Max(200,bodySurface.ClientSize.Width);WrapLabels(content);ResizeQueueColumns();};
         timer=new System.Windows.Forms.Timer();timer.Interval=250;timer.Tick+=PollJob;FormClosing+=ClosingWindow;
         Shown+=delegate{WindowLayout.Fit(this,new Size(720,560));content.Width=bodySurface.ClientSize.Width;WrapLabels(content);CleanupStaleJobs();};

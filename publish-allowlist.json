@@ -20,6 +20,8 @@
   "tests/QueueUiTests.cs",
   "tests/ScrollTests.cs",
   "tests/ScrollUiTests.cs",
+  "tests/WheelChainModelTests.cs",
+  "tests/WheelChainUiTests.cs",
   "tests/queue_ui_mock.py",
   "tests/test_tool.py",
   "tool-config.example.json",
