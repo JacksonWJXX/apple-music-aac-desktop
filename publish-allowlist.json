@@ -1,0 +1,21 @@
+[
+  ".gitignore",
+  "AppleMusicTool.cs",
+  "LICENSE",
+  "LICENSES/enhanced-Unlicense.txt",
+  "LICENSES/gamdl-MIT.txt",
+  "README.md",
+  "RELEASE.md",
+  "SECURITY.md",
+  "THIRD_PARTY_NOTICES.md",
+  "backend.py",
+  "docs/dependency-license-metadata.json",
+  "network_guard.py",
+  "publish-allowlist.json",
+  "requirements.lock",
+  "tests/test_tool.py",
+  "tool-config.example.json",
+  "tool_core.py",
+  "tools/audit_release.py",
+  "tools/setup.py"
+]

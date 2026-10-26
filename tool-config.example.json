@@ -1,0 +1,5 @@
+{
+  "python": ".runtime/Scripts/python.exe",
+  "ffmpeg": "SET_BY_LOCAL_SETUP",
+  "ffprobe": "SET_BY_LOCAL_SETUP"
+}
