@@ -18,6 +18,8 @@
   "requirements.lock",
   "tests/QueueTests.cs",
   "tests/QueueUiTests.cs",
+  "tests/ScrollTests.cs",
+  "tests/ScrollUiTests.cs",
   "tests/queue_ui_mock.py",
   "tests/test_tool.py",
   "tool-config.example.json",

@@ -1,0 +1,52 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Text;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+[assembly:TargetFramework(".NETFramework,Version=v4.8")]
+class ScrollUiTests {
+ [DllImport("user32.dll")]static extern IntPtr SendMessage(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
+ [DllImport("user32.dll",EntryPoint="SystemParametersInfoW")]static extern bool ReadPref(uint a,uint b,out bool value,uint flags);
+ [StructLayout(LayoutKind.Sequential)]struct NativeRect{public int Left,Top,Right,Bottom;}
+ sealed class PaintCounter:NativeWindow,IDisposable{public static int Paints,Erases;public PaintCounter(Control c){AssignHandle(c.Handle);}protected override void WndProc(ref Message m){if(m.Msg==0xF)Paints++;if(m.Msg==0x14)Erases++;base.WndProc(ref m);}public void Dispose(){ReleaseHandle();}}
+ static void CountWindows(Control p,List<PaintCounter> hooks){hooks.Add(new PaintCounter(p));foreach(Control c in p.Controls)CountWindows(c,hooks);}
+ static void Pump(int ms){Stopwatch s=Stopwatch.StartNew();while(s.ElapsedMilliseconds<ms){Application.DoEvents();System.Threading.Thread.Sleep(2);}}
+ static Panel FindSmooth(Control parent){if(parent.GetType().Name=="SmoothScrollPanel")return (Panel)parent;foreach(Control c in parent.Controls){Panel found=FindSmooth(c);if(found!=null)return found;}return null;}
+ static int Y(Panel panel){return -panel.AutoScrollPosition.Y;}
+ static void Wheel(Control target,int delta,Point screen){long p=((long)(ushort)(short)screen.Y<<16)|(ushort)(short)screen.X;SendMessage(target.Handle,0x020A,new IntPtr(delta<<16),new IntPtr(p));}
+ static Control Field(Type t,Form f,string name){return (Control)t.GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(f);}
+ static int Ticks(Panel p){var info=p.GetType().GetProperty("AnimationTicks");return info==null?0:(int)info.GetValue(p,null);}
+ [STAThread]static void Main(string[] args){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);string root=Path.GetFullPath(args[1]);if(Directory.Exists(root)&&Directory.GetFileSystemEntries(root).Length>0)throw new Exception("Test state directory must be new and empty.");Directory.CreateDirectory(root);File.WriteAllText(Path.Combine(root,"settings.json"),"{\"OutputFolder\":\"C:\\\\Music\\\\AppleMusic\",\"ScanFolder\":\"\"}");Type t=Assembly.LoadFrom(Path.GetFullPath(args[0])).GetType("MainWindow");var r=new Dictionary<string,object>();
+ using(Form f=(Form)Activator.CreateInstance(t,BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public,null,new object[]{root},null)){
+  f.ShowInTaskbar=false;f.Show();Application.DoEvents();Panel body=(Panel)Field(t,f,"bodySurface");Point blank=body.PointToScreen(new Point(3,3));r["dpi"]=f.DeviceDpi;r["wheel_lines"]=SystemInformation.MouseWheelScrollLines;bool animations;ReadPref(0x1042,0,out animations,0);r["system_client_animations"]=animations;r["scroll_max"]=body.VerticalScroll.Maximum-body.VerticalScroll.LargeChange+1;
+  body.AutoScrollPosition=Point.Empty;Wheel(body,-120,blank);var samples=new List<int>();Stopwatch time=Stopwatch.StartNew();int prev=-1;while(time.ElapsedMilliseconds<350){Application.DoEvents();int y=Y(body);if(y!=prev){samples.Add(y);prev=y;}System.Threading.Thread.Sleep(2);}r["one_notch_samples"]=samples;r["one_notch_pixels"]=Y(body);r["animation_ticks"]=Ticks(body);
+  int beforeTicks=Ticks(body);TimeSpan cpu=Process.GetCurrentProcess().TotalProcessorTime;Pump(250);r["idle_timer_ticks"]=Ticks(body)-beforeTicks;r["idle_cpu_ms"]=(Process.GetCurrentProcess().TotalProcessorTime-cpu).TotalMilliseconds;
+  body.AutoScrollPosition=Point.Empty;Button button=(Button)Field(t,f,"addQueue");Wheel(button,-120,button.PointToScreen(new Point(button.Width/2,button.Height/2)));Pump(350);r["button_route_pixels"]=Y(body);
+  body.AutoScrollPosition=Point.Empty;for(int i=0;i<12;i++)Wheel(body,-10,blank);Pump(350);r["fine_delta_pixels"]=Y(body);
+  body.AutoScrollPosition=Point.Empty;Wheel(body,-120,blank);Stopwatch wait=Stopwatch.StartNew();while(Y(body)==0&&wait.ElapsedMilliseconds<300)Pump(5);int reversal=Y(body);Wheel(body,120,blank);Pump(350);r["reverse_start"]=reversal;r["reverse_end"]=Y(body);
+  body.AutoScrollPosition=Point.Empty;var hooks=new List<PaintCounter>();CountWindows(body,hooks);PaintCounter.Paints=PaintCounter.Erases=0;int layouts=0,paints=0;LayoutEventHandler onLayout=delegate{layouts++;};PaintEventHandler onPaint=delegate{paints++;};body.Layout+=onLayout;body.Paint+=onPaint;cpu=Process.GetCurrentProcess().TotalProcessorTime;beforeTicks=Ticks(body);for(int i=0;i<1000;i++)Wheel(body,-120,blank);Pump(350);r["burst_cpu_ms"]=(Process.GetCurrentProcess().TotalProcessorTime-cpu).TotalMilliseconds;r["burst_timer_ticks"]=Ticks(body)-beforeTicks;r["burst_layout_events"]=layouts;r["burst_paint_events"]=paints;r["burst_end"]=Y(body);body.Layout-=onLayout;body.Paint-=onPaint;r["burst_all_child_wm_paint"]=PaintCounter.Paints;r["burst_all_child_wm_erase"]=PaintCounter.Erases;foreach(var hook in hooks)hook.Dispose();
+  Wheel(body,-120,blank);Pump(250);r["bottom_clamped"]=Y(body)==(int)r["scroll_max"];Wheel(body,120,blank);Pump(350);r["bottom_reverse_no_overshoot"]=Y(body)==Math.Max(0,(int)r["scroll_max"]-(int)r["one_notch_pixels"]);
+  body.AutoScrollPosition=Point.Empty;Wheel(body,120,blank);Pump(250);r["top_clamped"]=Y(body)==0;Wheel(body,-120,blank);Pump(350);r["top_reverse_no_overshoot"]=Y(body)==(int)r["one_notch_pixels"];
+  TextBox input=(TextBox)Field(t,f,"link");var text=new StringBuilder();for(int i=0;i<100;i++)text.Append("SYNTHETIC_LINE_").Append(i).Append("\r\n");input.Text=text.ToString();body.ScrollControlIntoView(input);input.Focus();input.SelectionStart=0;input.ScrollToCaret();int outer=Y(body),first=(int)SendMessage(input.Handle,0x00CE,IntPtr.Zero,IntPtr.Zero);Wheel(input,-120,input.PointToScreen(new Point(15,15)));Pump(350);r["input_outer_unchanged"]=Y(body)==outer;r["input_native_scrolls"]=(int)SendMessage(input.Handle,0x00CE,IntPtr.Zero,IntPtr.Zero)>first;r["input_text_and_focus_preserved"]=input.Text==text.ToString()&&input.Focused;
+  ListView list=(ListView)Field(t,f,"queueView");for(int i=0;i<100;i++)list.Items.Add(new ListViewItem(new[]{"Synthetic "+i,"Waiting","—"}));body.ScrollControlIntoView(list);list.Focus();list.TopItem=list.Items[0];outer=Y(body);int top=list.TopItem.Index;Wheel(list,-120,list.PointToScreen(new Point(30,60)));Pump(350);r["queue_outer_unchanged"]=Y(body)==outer;r["queue_native_scrolls"]=list.TopItem.Index>top;r["queue_focus_preserved"]=list.Focused;
+  body.AutoScrollPosition=Point.Empty;Wheel(body,-120,blank);Pump(25);int navigation=Math.Min(150,body.VerticalScroll.Maximum-body.VerticalScroll.LargeChange+1);body.AutoScrollPosition=new Point(0,navigation);Pump(350);r["external_navigation_cancels_motion"]=Y(body)==navigation;
+  outer=Y(body);list.TopItem=list.Items[list.Items.Count-1];Wheel(list,-120,list.PointToScreen(new Point(30,60)));Pump(250);r["queue_boundary_does_not_scroll_parent"]=Y(body)==outer;
+  Wheel(body,-120,list.PointToScreen(new Point(30,60)));Pump(250);r["bubbled_native_copy_does_not_scroll_parent"]=Y(body)==outer;
+  var dpiRuns=new List<object>();
+  foreach(int dpi in new[]{96,120,144,192}){Rectangle bounds=f.Bounds;double ratio=dpi/(double)f.DeviceDpi;NativeRect rect=new NativeRect{Left=bounds.Left,Top=bounds.Top,Right=bounds.Left+(int)(bounds.Width*ratio),Bottom=bounds.Top+(int)(bounds.Height*ratio)};IntPtr memory=Marshal.AllocHGlobal(Marshal.SizeOf(rect));try{Marshal.StructureToPtr(rect,memory,false);SendMessage(f.Handle,0x02E0,new IntPtr(dpi|(dpi<<16)),memory);}finally{Marshal.FreeHGlobal(memory);}Pump(100);body.AutoScrollPosition=Point.Empty;Wheel(body,-120,body.PointToScreen(new Point(3,3)));Pump(350);dpiRuns.Add(new{requested=dpi,reported_form=f.DeviceDpi,reported_body=body.DeviceDpi,one_notch_pixels=Y(body),expected=(int)Math.Round(24*f.DeviceDpi/96.0)});}
+  r["own_window_simulated_dpi_messages"]=dpiRuns;
+  int saves=0;Type guideType=t.Assembly.GetType("LoginGuide");using(Form guide=(Form)Activator.CreateInstance(guideType,BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public,null,new object[]{new Action<string>(delegate{saves++;})},null)){guide.ShowInTaskbar=false;guide.Show(f);Application.DoEvents();guide.MinimumSize=Size.Empty;guide.Size=new Size(680,480);Pump(100);Panel scroll=FindSmooth(guide);int cap=scroll.VerticalScroll.Maximum-scroll.VerticalScroll.LargeChange+1;Wheel(scroll,-120,scroll.PointToScreen(new Point(3,3)));Pump(350);r["guide_native_panel_scrolls"]=scroll.VerticalScroll.Visible&&Y(scroll)==Math.Min(cap,(int)Math.Round(24*guide.DeviceDpi/96.0));guide.Close();r["guide_did_not_save_credentials"]=saves==0;}
+  f.Close();r["closed_cleanly"]=f.IsDisposed;
+ }
+ bool passed=true;foreach(string name in new[]{"input_outer_unchanged","input_text_and_focus_preserved","queue_outer_unchanged","queue_focus_preserved","external_navigation_cancels_motion","queue_boundary_does_not_scroll_parent","bubbled_native_copy_does_not_scroll_parent","bottom_clamped","bottom_reverse_no_overshoot","top_clamped","top_reverse_no_overshoot","guide_native_panel_scrolls","guide_did_not_save_credentials","closed_cleanly"})passed&=(bool)r[name];
+ passed&=(int)r["idle_timer_ticks"]==0;
+ if((int)r["wheel_lines"]==3){passed&=(int)r["one_notch_pixels"]==(int)Math.Round(24*(int)r["dpi"]/96.0);passed&=(int)r["button_route_pixels"]==(int)r["one_notch_pixels"]&&(int)r["fine_delta_pixels"]==(int)r["one_notch_pixels"];passed&=(bool)r["input_native_scrolls"]&&(bool)r["queue_native_scrolls"];passed&=(int)r["reverse_start"]>0&&(int)r["reverse_end"]<(int)r["reverse_start"];foreach(var run in (List<object>)r["own_window_simulated_dpi_messages"]){Type d=run.GetType();passed&=(int)d.GetProperty("requested").GetValue(run,null)==(int)d.GetProperty("reported_form").GetValue(run,null);passed&=(int)d.GetProperty("one_notch_pixels").GetValue(run,null)==(int)d.GetProperty("expected").GetValue(run,null);}}
+ else r["numeric_test_note"]="Non-default system wheel preference: numeric 3-line reference checks skipped; inspect recorded counters.";
+ r["passed"]=passed;File.WriteAllText(Path.Combine(root,"scroll-probe.json"),new JavaScriptSerializer().Serialize(r));Environment.ExitCode=passed?0:1;}
+}

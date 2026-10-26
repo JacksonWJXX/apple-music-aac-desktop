@@ -123,3 +123,25 @@ Get-Content (Join-Path $state 'queue-ui-results.json')
 ```
 
 模型测试覆盖串行、失败继续、重复、取消及数量边界。界面测试只使用独立临时目录、虚构登录值和假任务，不导入 Apple 网络库，不产生真实下载；测试窗口的关闭确认也仅操作测试进程自己拥有的对话框。不得把 `$state` 改成应用目录或包含个人文件的目录；测试拒绝已有非空目录。假任务的“完成”仅用于验证界面调度，不代表音频验证测试，可与现有 Python 音频完整性测试配合运行。
+
+## 页面滚轮
+
+页面和登录指引使用应用内小步滚动。正常行滚动按系统设置的行数计算，每行 8 个逻辑像素；例如系统设为 3 行、150% 缩放时，一个刻度移动 36 像素。高精度滚轮按实际 delta 比例积累，不需要凑齐一个刻度后才跳动。系统设置为不滚动或整页滚动时分别遵守；不修改 Windows 的全局滚轮或缩放设置。
+
+动画仅有一个当前目标，快速输入合并，反向输入取消旧方向，边界不积压额外位移。系统关闭客户端动画时直接应用小步位移；正常动画结束后计时器停止。滚动条拖动、焦点导航和窗口调整会终止旧动画。多行输入和队列保留原生滚动，外层不会再次处理它们转发的滚轮，不改变输入内容或焦点。
+
+维护测试（接续上方 `$csc` 和 `$refs`）：
+
+```powershell
+& $csc /nologo /target:exe /codepage:65001 /main:ScrollTests /out:tests/ScrollTests.exe $refs AppleMusicTool.cs tests/ScrollTests.cs
+& .\tests\ScrollTests.exe
+& $csc /nologo /target:exe /codepage:65001 /win32manifest:app.manifest /out:tests/ScrollUiTests.exe $refs tests/ScrollUiTests.cs
+Copy-Item App.config tests/ScrollUiTests.exe.config
+$state = Join-Path $env:TEMP ('AppleMusicScrollTests-' + [guid]::NewGuid().ToString('N'))
+& .\tests\ScrollUiTests.exe .\AppleMusicAAC.exe $state
+Get-Content (Join-Path $state 'scroll-probe.json')
+```
+
+滚动界面测试只创建独立合成状态窗口，向它自己拥有的控件发送消息，记录位移、计时器、CPU 和原生重绘计数；不模拟全局鼠标，不读取真实登录，不调用 Apple。测试拒绝已有非空状态目录。跨 DPI 部分是对测试窗口发送 DPI 消息的模拟，真实屏幕 DPI 另行记录，不等同于真实多显示器验证。系统动画关闭和整页/零行偏好由纯模型测试与分支检查覆盖，不为测试更改系统设置。实际显示流畅程度仍需要用户设备体验确认。
+
+API semantics: [MouseWheel event](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.control.mousewheel), [system wheel preference](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.systeminformation.mousewheelscrolllines), [read-only client animation query](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfow). The smaller logical line size and target interpolation are application choices.

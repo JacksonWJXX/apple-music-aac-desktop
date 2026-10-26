@@ -37,6 +37,82 @@ internal static class WindowLayout {
     }
 }
 
+// Logical wheel distance and a single coalesced animation target. No queued
+// animations: reverse input replaces the outstanding direction immediately.
+internal sealed class ScrollMotion {
+    public double Position {get;private set;}
+    public double Target {get;private set;}
+    private int direction;
+    public bool Moving {get{return Math.Abs(Target-Position)>0.00001;}}
+    private static double Clamp(double value,int maximum){return Math.Max(0,Math.Min(Math.Max(0,maximum),value));}
+    public void Reset(int position,int maximum){Position=Target=Clamp(position,maximum);direction=0;}
+    public void Wheel(int delta,int dpi,int lines,int viewport,int maximum){
+        Position=Clamp(Position,maximum);Target=Clamp(Target,maximum);
+        if(delta==0||lines==0)return;
+        double unit=lines<0?Math.Max(1,viewport-24*dpi/96.0):8*dpi/96.0*lines;
+        double distance=-delta/120.0*unit;int nextDirection=Math.Sign(distance);
+        if(Moving&&direction!=0&&direction!=nextDirection)Target=Position;
+        Target=Clamp(Target+distance,maximum);direction=nextDirection;
+    }
+    public int Advance(double milliseconds,int maximum){
+        Position=Clamp(Position,maximum);Target=Clamp(Target,maximum);
+        Position+=(Target-Position)*(1-Math.Exp(-Math.Max(0,Math.Min(64,milliseconds))/25.0));
+        if(Math.Abs(Target-Position)<0.15)Position=Target;
+        return (int)Math.Round(Position,MidpointRounding.AwayFromZero);
+    }
+    public int Finish(){Position=Target;return (int)Math.Round(Position,MidpointRounding.AwayFromZero);}
+}
+
+internal sealed class SmoothScrollPanel : Panel {
+    private readonly ScrollMotion motion=new ScrollMotion();
+    private readonly Stopwatch elapsed=new Stopwatch();
+    private readonly System.Windows.Forms.Timer animation;
+    private int rendered=-1;
+    private bool applying;
+    public int AnimationTicks {get;private set;}
+    public bool AnimationRunning {get{return animation!=null&&animation.Enabled;}}
+    [DllImport("user32.dll",EntryPoint="SystemParametersInfoW")]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReadSystemPreference(uint action,uint parameter,[MarshalAs(UnmanagedType.Bool)]out bool value,uint flags);
+    private static bool AnimationAllowed(){bool value;return ReadSystemPreference(0x1042,0,out value,0)&&value;}
+    private int MaximumOffset {get{return VerticalScroll.Visible?Math.Max(0,VerticalScroll.Maximum-VerticalScroll.LargeChange+1):0;}}
+    public SmoothScrollPanel(){AutoScroll=true;DoubleBuffered=true;animation=new System.Windows.Forms.Timer();animation.Interval=15;animation.Tick+=Animate;}
+    private void StopAndSync(){if(animation!=null)animation.Stop();elapsed.Reset();rendered=Math.Max(0,-AutoScrollPosition.Y);motion.Reset(rendered,MaximumOffset);}
+    private void Render(int position){if(position==rendered)return;applying=true;try{AutoScrollPosition=new Point(-AutoScrollPosition.X,position);rendered=Math.Max(0,-AutoScrollPosition.Y);}finally{applying=false;}}
+    private void Animate(object sender,EventArgs args){
+        // Focus navigation/scrollbar changes always win over an old wheel target.
+        if(!Visible||!IsHandleCreated||Math.Max(0,-AutoScrollPosition.Y)!=rendered){StopAndSync();return;}
+        AnimationTicks++;double dt=elapsed.Elapsed.TotalMilliseconds;elapsed.Restart();Render(motion.Advance(dt,MaximumOffset));
+        if(!motion.Moving){animation.Stop();elapsed.Reset();}
+    }
+    private bool OverNativeScroller(Point screen){
+        Control parent=this;
+        while(true){Control child=parent.GetChildAtPoint(parent.PointToClient(screen),GetChildAtPointSkip.Invisible);if(child==null)return false;if(child is TextBoxBase||child is ListView)return true;parent=child;}
+    }
+    protected override void WndProc(ref Message message){
+        if(message.Msg==0x020A&&VerticalScroll.Visible){
+            long point=message.LParam.ToInt64();Point screen=new Point((short)(point&0xffff),(short)((point>>16)&0xffff));
+            // Native edit/list controls keep their own wheel handling, including
+            // at their boundaries; never redirect or process a bubbled copy twice.
+            if(OverNativeScroller(screen)){message.Result=IntPtr.Zero;return;}
+            if(rendered<0||Math.Max(0,-AutoScrollPosition.Y)!=rendered)StopAndSync();
+            int delta=(short)((message.WParam.ToInt64()>>16)&0xffff);
+            int lines=SystemInformation.MouseWheelScrollLines;
+            if(lines==0){StopAndSync();message.Result=IntPtr.Zero;return;}
+            bool animate=animation.Enabled||AnimationAllowed();Form owner=FindForm();motion.Wheel(delta,owner==null?DeviceDpi:owner.DeviceDpi,lines,ClientSize.Height,MaximumOffset);
+            if(!animate){Render(motion.Finish());}
+            else if(motion.Moving&&!animation.Enabled){elapsed.Restart();animation.Start();}
+            message.Result=IntPtr.Zero;return; // do not invoke default AutoScroll again
+        }
+        if(message.Msg==0x0115||message.Msg==0x0114)StopAndSync();
+        base.WndProc(ref message);
+    }
+    protected override void OnScroll(ScrollEventArgs args){if(!applying)StopAndSync();base.OnScroll(args);}
+    protected override void OnClientSizeChanged(EventArgs args){if(animation!=null)StopAndSync();base.OnClientSizeChanged(args);}
+    protected override void OnVisibleChanged(EventArgs args){if(animation!=null&&!Visible)StopAndSync();base.OnVisibleChanged(args);}
+    protected override void Dispose(bool disposing){if(disposing&&animation!=null){animation.Stop();animation.Dispose();}base.Dispose(disposing);}
+}
+
 internal sealed class BusyGate {
     private int busy;
     public bool Enter() { return Interlocked.CompareExchange(ref busy, 1, 0) == 0; }
@@ -192,7 +268,7 @@ internal sealed class LoginGuide : Form {
         saver=saveAction;Text="登录指引 · 只粘贴自己的 Cookie 值";Font=new Font("Microsoft YaHei UI",9.5F);AutoScaleDimensions=new SizeF(96F,96F);AutoScaleMode=AutoScaleMode.Dpi;
         BackColor=Color.FromArgb(250,249,245);FormBorderStyle=FormBorderStyle.Sizable;MaximizeBox=false;MinimizeBox=false;StartPosition=FormStartPosition.CenterParent;Size=WindowLayout.FitSize(Screen.PrimaryScreen.WorkingArea,new Size(720,600));
         TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Absolute,160));Controls.Add(shell);
-        Panel scroll=new Panel();scroll.Dock=DockStyle.Fill;scroll.AutoScroll=true;scroll.Margin=Padding.Empty;shell.Controls.Add(scroll,0,0);
+        Panel scroll=new SmoothScrollPanel();scroll.Dock=DockStyle.Fill;scroll.AutoScroll=true;scroll.Margin=Padding.Empty;shell.Controls.Add(scroll,0,0);
         TableLayoutPanel body=new TableLayoutPanel();body.ColumnCount=1;body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));body.AutoSize=true;body.AutoSizeMode=AutoSizeMode.GrowAndShrink;body.Dock=DockStyle.Top;body.Padding=new Padding(16);scroll.Controls.Add(body);
         Action<Control> add=delegate(Control control){int row=body.RowCount++;body.RowStyles.Add(new RowStyle(SizeType.AutoSize));control.Dock=DockStyle.Top;control.Margin=new Padding(0,4,0,8);body.Controls.Add(control,0,row);};
         Label heading=new Label();heading.AutoSize=true;heading.Text="自己登录 → 找到这一项 → 只粘贴值";heading.Font=new Font(Font.FontFamily,15,FontStyle.Bold);add(heading);
@@ -288,7 +364,7 @@ internal sealed class MainWindow : Form {
         BackColor=Color.FromArgb(250,249,245);ForeColor=Color.FromArgb(48,53,43);FormBorderStyle=FormBorderStyle.Sizable;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
         Size=WindowLayout.FitSize(Screen.PrimaryScreen.WorkingArea,new Size(720,560));
         TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));Controls.Add(shell);
-        bodySurface=new Panel();bodySurface.Dock=DockStyle.Fill;bodySurface.AutoScroll=true;bodySurface.Margin=Padding.Empty;shell.Controls.Add(bodySurface,0,0);
+        bodySurface=new SmoothScrollPanel();bodySurface.Dock=DockStyle.Fill;bodySurface.AutoScroll=true;bodySurface.Margin=Padding.Empty;shell.Controls.Add(bodySurface,0,0);
         TableLayoutPanel content=Stack(BackColor);content.Padding=new Padding(18,14,18,8);bodySurface.Controls.Add(content);
         Label heading=BodyLabel("Apple Music 下载队列",true);heading.Font=new Font(Font.FontFamily,18,FontStyle.Bold);Row(content,heading);
         Row(content,BodyLabel("AAC 音频 · 按歌曲名保存 · 已有文件不覆盖",false));
