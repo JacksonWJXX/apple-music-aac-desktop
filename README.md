@@ -165,3 +165,42 @@ Get-Content (Join-Path $state 'wheel-chain-results.json')
 ```
 
 界面测试使用独立合成内容和自己的窗口消息，覆盖空/短/长输入、两端、正反向、小 delta、队列、选择与焦点、修饰键消息位、控件句柄重建和页面边界；数字断言基于系统设置为每刻度 3 行，其他设置会报告失败，不为测试改动系统。修饰键是消息标志测试，不向全局键盘注入按键。真实硬件手感仍需体验确认。
+
+## 专辑归档与整理已有歌曲
+
+新下载使用本次歌曲响应里已有的 `albumName`，保存为“所选输出根目录 / 专辑名 / 曲名.m4a”，不额外查询专辑、不扩大下载范围。同名专辑归在一起；缺失专辑名归“未知专辑”。非法字符、设备保留名和超长专辑名会安全缩短，必要时附稳定摘要，避免不同名称被清理成同一路径。歌曲同名继续采用不覆盖的备用文件名。
+
+整理已有文件：
+
+1. 用“更改保存位置”选择**音乐总目录**，不要选择磁盘根目录、应用或源码目录。
+2. 点击“整理已有歌曲”。先只扫描本地内嵌专辑标签，显示原位置、目标位置、保留/跳过原因。
+3. 核对预览后，明确点击“确认整理”才移动。点击取消、按 Esc 或关闭预览均不会批准移动；计划等待超过 15 分钟失效。
+4. 整理期间显示处理/移动/失败数量，下载和其他整理操作互斥。取消会等待当前文件安全结束；已确认后可能保留已经完成的移动。整理中关闭主窗会先请求停止，结束后可再次关闭。
+5. 结果显示计数及本地移动记录位置。再次整理已经位于正确专辑目录的歌曲不会重复套文件夹。已有歌曲保留原文件名，不根据文件名猜专辑，也不改写音频或标签。
+
+支持 `.m4a .mp3 .flac .wav .ogg .opus .aif .aiff .aac .wma`，还会用既有 FFprobe 验证是音频；扩展名相同的非音频不会移动。缺少标签统一归“未知专辑”，不发起网络查询。元数据读取限制为本地文件协议及音频容器白名单。
+
+同名目标不覆盖，预览会分配数字后缀；确认后若源文件发生变化或目标被占用，则保留源文件并记录失败。使用 Windows 原子重命名；跨卷或文件占用失败时不会偷偷执行复制后删除。扫描不跟随符号链接、junction、其他重解析点或云占位文件；不移动硬链接，跳过点号开头目录/文件及识别出的应用/源码子目录。范围限制为 8 层、5000 个候选音频、2000 个目录、每文件 2 GiB；每次元数据读取最多 15 秒。只支持本地目录，拒绝 UNC、设备路径、磁盘根目录和过深的根路径（超过 180 个 UTF-16 单位）；目标完整路径保守限制在 240 单位。超限会停止或跳过并报告，不修改系统长路径策略。
+
+### 移动记录与恢复
+
+记录位于音乐总目录的 `.applemusic-organizer/*.jsonl`，记录相对于该总目录的 `source`、`target`、文件身份/内容摘要、`intent`（移动前已刷新）、`moved`（成功）或 `failed`。这些是**私人曲目清单，不要上传到聊天、Issue、GitHub 或开源包**。临时预览保存在应用自己的 `private/organize-jobs`，仅清理已知计划文件；遇到意外文件则保留并提示。
+
+需要恢复时先停止下载/整理，保留记录副本。按成功的 `moved` 对应 `intent` 逐项检查：目标文件仍存在、原路径空闲、内容 SHA256 与记录一致，再手动移回原相对路径；原路径已有文件时不要覆盖。中断可能只有 `intent` 而没有 `moved`，此时先检查两边实际位置，不要据记录盲目移动。没有自动回滚按钮；记录失败或部分完成时保留已移动音乐，人工核对记录后处理。不要删除唯一一份音频。
+
+### 专辑功能的离线测试
+
+```powershell
+.runtime\Scripts\python.exe -I -B tests/test_album_library.py
+.runtime\Scripts\python.exe -I -B tests/test_tool.py
+& $csc /nologo /target:exe /codepage:65001 /win32manifest:app.manifest /out:tests/OrganizerUiTests.exe $refs tests/OrganizerUiTests.cs
+Copy-Item App.config tests/OrganizerUiTests.exe.config
+$fixtures = Join-Path $env:TEMP ('AppleMusicAlbumUi-' + [guid]::NewGuid().ToString('N'))
+.runtime\Scripts\python.exe -I -B tests/prepare_organizer_ui.py $fixtures
+& .\tests\OrganizerUiTests.exe .\AppleMusicAAC.exe $fixtures
+Get-Content (Join-Path $fixtures 'organizer-ui-results.json')
+```
+
+只使用新建、带标记的合成音频目录。界面测试验证取消和关闭预览零移动、明确确认后移动、所有音频字节保持及互斥，不读取真实账号，不自动整理现有音乐。当前测试环境不能创建真实 junction，因此该用例跳过，另有属性模拟拒绝测试；跨卷失败由注入 `EXDEV` 覆盖，不代表真实跨卷测试。文件占用使用了 Windows 实际共享模式。共享目录锁协调本工具的进程，不能约束不遵守锁的其他程序；执行前会再核对路径、重解析点和文件指纹，不承诺抵御同用户恶意持续替换文件。归档不代替备份。
+
+专辑字段来源：[Apple Songs.Attributes](https://developer.apple.com/documentation/applemusicapi/songs/attributes-data.dictionary)。

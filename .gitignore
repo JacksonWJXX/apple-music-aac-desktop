@@ -41,3 +41,10 @@ self-test-*/
 ui-preview.png
 ui-self-test.json
 .git/
+
+.applemusic-organizer/
+.applemusic-library.lock
+*.jsonl
+synthetic-fixture.txt
+fixture-hashes.json
+organizer-ui-results.json

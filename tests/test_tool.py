@@ -117,6 +117,46 @@ class ToolTests(unittest.TestCase):
             self.assertEqual((dest / '歌曲.m4a').read_bytes(), b'EXISTING')
             self.assertEqual(len(list(dest.glob('*.m4a'))), 5)
 
+    def test_long_path_collision_suffixes_have_reserved_space(self):
+        # Reproduce the reviewed 57-unit budget, then exercise the minimum 20.
+        from tool_core import _units
+        for budget in (57,20):
+            with tempfile.TemporaryDirectory(dir=ROOT) as name:
+                root=pathlib.Path(name);length=240-1-4-budget
+                dest=root/('d'*(length-_units(str(root))-1));dest.mkdir()
+                self.assertEqual(_units(str(dest)),length)
+                outputs=[];contents={}
+                for index in range(10):
+                    source=root/('source'+str(index));payload=('NEW_'+str(index)).encode();source.write_bytes(payload)
+                    # First four items distinguish artists/IDs; the remaining
+                    # identical metadata require numbered suffixes to survive.
+                    artist='Artist_'+str(index) if index<4 else 'Repeated_Artist'*10
+                    song_id=str(12345678901234567890+index) if index<4 else '12345678901234567890'
+                    target=publish_audio(source,dest,'T'*120,artist,song_id)
+                    self.assertNotIn(target,outputs);self.assertLessEqual(_units(target.stem),budget);self.assertLessEqual(_units(str(target)),240)
+                    self.assertEqual(target.suffix,'.m4a');self.assertFalse(source.exists());self.assertEqual(target.read_bytes(),payload)
+                    outputs.append(target);contents[target]=payload
+                self.assertTrue(any(' (' in p.stem for p in outputs))
+                for target,payload in contents.items():self.assertEqual(target.read_bytes(),payload)
+
+    def test_collision_components_are_safe_at_minimum_budget(self):
+        from tool_core import _collision_stem,_units
+        for title in ['CON.long','COM1.ext','../bad:name', '\U0001f600'*120,' . ']:
+            names=set()
+            for ordinal in (None,2,3,998):
+                stem=_collision_stem(title,r'../AUX:unsafe\\artist'*10,20,ordinal)
+                self.assertLessEqual(_units(stem),20);self.assertTrue(stem)
+                self.assertFalse(any(c in stem for c in '<>:"/\\|?*'))
+                self.assertEqual(stem,stem.rstrip(' .'));self.assertNotIn(stem,names);names.add(stem)
+
+    def test_insufficient_path_budget_preserves_source(self):
+        from tool_core import _units
+        with tempfile.TemporaryDirectory(dir=ROOT) as name:
+            root=pathlib.Path(name);length=240-1-4-19
+            dest=root/('d'*(length-_units(str(root))-1));source=root/'source';source.write_bytes(b'UNCHANGED')
+            with self.assertRaisesRegex(ToolError,'path_too_long'):publish_audio(source,dest,'title','artist','1')
+            self.assertEqual(source.read_bytes(),b'UNCHANGED');self.assertFalse(list(dest.glob('*.m4a')))
+
     def test_apple_destination_guard(self):
         network_guard.check_request('https://amp-api.music.apple.com', {'cookie':'SYNTHETIC'})
         network_guard.check_request('https://music.apple.com:443', {'Media-User-Token':'SYNTHETIC'})
@@ -154,11 +194,13 @@ class ToolTests(unittest.TestCase):
                 self.assertEqual(canonical,'https://music.apple.com/us/song/123')
                 (job/'staging').mkdir()
                 subprocess.run([ffmpeg,'-hide_banner','-nostdin','-v','error','-f','lavfi','-i','sine=frequency=440:duration=0.4','-c:a','aac',str(job/'staging'/'test.m4a')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),timeout=10)
-                return {'title':'合成/测试','artist':'测试','expected_duration':0.4}
+                return {'album':'Synthetic Download Album','title':'合成/测试','artist':'测试','expected_duration':0.4}
             self.assertEqual(backend.run_job(job,stub,dest),0)
             result=json.loads((job/'status.json').read_text())
             self.assertEqual(result['phase'],'success'); self.assertEqual(result['codec'],'aac')
             self.assertEqual(pathlib.Path(result['file']).name,'合成_测试.m4a')
+            self.assertEqual(pathlib.Path(result['file']).parent.name,'Synthetic Download Album')
+            self.assertEqual(result['album'],'Synthetic Download Album')
             self.assertFalse((job/'cookies.txt').exists())
 
     def test_mock_error_sanitized_and_cookie_cleanup(self):
@@ -179,7 +221,15 @@ class ToolTests(unittest.TestCase):
                 return {'title':'短片测试','artist':'测试','expected_duration':116.399}
             self.assertEqual(backend.run_job(job,stub,dest),1)
             self.assertEqual(json.loads((job/'status.json').read_text())['category'],'audio_incomplete')
-            self.assertFalse(dest.exists()); self.assertFalse((job/'cookies.txt').exists())
+            self.assertFalse(list(dest.rglob('*.m4a'))); self.assertFalse((job/'cookies.txt').exists())
 
+
+    def test_library_lock_prevents_download_callback(self):
+        from album_library import library_lock
+        with tempfile.TemporaryDirectory(dir=ROOT) as name:
+            root=pathlib.Path(name);job=self.prepare_job(root);dest=root/'out';dest.mkdir();called=[]
+            async def stub(*args):called.append(True);raise AssertionError('must not authenticate/download')
+            with library_lock(dest):self.assertEqual(backend.run_job(job,stub,dest),1)
+            self.assertEqual(called,[]);self.assertEqual(json.loads((job/'status.json').read_text())['category'],'library_busy');self.assertFalse((job/'cookies.txt').exists())
 
 if __name__ == '__main__': unittest.main(verbosity=2)

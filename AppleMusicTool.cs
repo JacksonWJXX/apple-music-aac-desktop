@@ -415,6 +415,21 @@ internal sealed class SongQueue {
     public void ClearFinished() {Items.RemoveAll(delegate(SongQueueItem item){return item.Terminal;});}
 }
 
+internal sealed class OrganizePreview : Form {
+    public OrganizePreview(Dictionary<string,object> plan,string folder){
+        Text="整理预览 · 确认后才移动";Font=new Font("Microsoft YaHei UI",9.5F);AutoScaleDimensions=new SizeF(96,96);AutoScaleMode=AutoScaleMode.Dpi;BackColor=Color.FromArgb(250,249,245);
+        TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.Padding=new Padding(12);shell.ColumnCount=1;shell.RowCount=3;shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));Controls.Add(shell);
+        Label note=new Label();note.AutoSize=true;note.Dock=DockStyle.Fill;note.Text="目录："+folder+"\n计划移动 "+plan["moves"]+" 首，已归档 "+plan["already"]+" 首，跳过 "+plan["skipped"]+" 项。取消或关闭本窗口不会移动文件。";note.Margin=new Padding(0,0,0,10);shell.Controls.Add(note,0,0);
+        ListView rows=new ListView();rows.Dock=DockStyle.Fill;rows.View=View.Details;rows.FullRowSelect=true;rows.Columns.Add("现有文件（相对目录）",280);rows.Columns.Add("目标（相对目录）",330);rows.Columns.Add("计划 / 原因",180);shell.Controls.Add(rows,0,1);
+        rows.BeginUpdate();foreach(object value in (System.Collections.IEnumerable)plan["entries"]){var entry=(Dictionary<string,object>)value;string action=Convert.ToString(entry["action"]);rows.Items.Add(new ListViewItem(new[]{Convert.ToString(entry["source"]),Convert.ToString(entry["target"]),action=="move"?"移动":action=="keep"?"已归档":"跳过："+Convert.ToString(entry["reason"])}));}rows.EndUpdate();
+        FlowLayoutPanel buttons=new FlowLayoutPanel();buttons.AutoSize=true;buttons.Dock=DockStyle.Fill;buttons.FlowDirection=FlowDirection.RightToLeft;buttons.Padding=new Padding(0,10,0,0);shell.Controls.Add(buttons,0,2);
+        Button back=new Button();back.Text="取消，不移动";back.AutoSize=true;back.Padding=new Padding(10,5,10,5);back.DialogResult=DialogResult.Cancel;buttons.Controls.Add(back);CancelButton=back;
+        Button apply=new Button();apply.Text="确认整理";apply.AutoSize=true;apply.Padding=new Padding(10,5,10,5);apply.Enabled=Convert.ToInt32(plan["moves"])>0;apply.DialogResult=DialogResult.OK;buttons.Controls.Add(apply);
+        Shown+=delegate{WindowLayout.Fit(this,new Size(900,600));ActiveControl=back;};DpiChanged+=delegate{WindowLayout.Clamp(this);};
+        shell.ClientSizeChanged+=delegate{note.MaximumSize=new Size(Math.Max(200,shell.ClientSize.Width-28),0);};
+    }
+}
+
 internal sealed class MainWindow : Form {
     private readonly string root, jobsRoot;
     private string output, activeOutput;
@@ -435,6 +450,10 @@ internal sealed class MainWindow : Form {
     private Process process; private KillJob killJob; private string jobFolder, sessionToken;
     private bool cancelRequested; private DateTime started;
     private string previousPhase = "";
+    private Button organize;
+    private bool organizing,orgPreviewOpen,orgPreviewShown,orgCancelling;
+    private Process orgProcess;private KillJob orgKill;private System.Windows.Forms.Timer orgTimer;
+    private string orgJob,orgOutput;
 
     public MainWindow(string folder) {
         root=folder;jobsRoot=Path.Combine(root,"private","jobs");vault=new CredentialVault(Path.Combine(root,"private"));settings=ToolSettings.Load(root);output=settings.OutputFolder;
@@ -445,7 +464,7 @@ internal sealed class MainWindow : Form {
         bodySurface=new SmoothScrollPanel();bodySurface.Dock=DockStyle.Fill;bodySurface.AutoScroll=true;bodySurface.Margin=Padding.Empty;shell.Controls.Add(bodySurface,0,0);
         TableLayoutPanel content=Stack(BackColor);content.Padding=new Padding(18,14,18,8);bodySurface.Controls.Add(content);
         Label heading=BodyLabel("Apple Music 下载队列",true);heading.Font=new Font(Font.FontFamily,18,FontStyle.Bold);Row(content,heading);
-        Row(content,BodyLabel("AAC 音频 · 按歌曲名保存 · 已有文件不覆盖",false));
+        Row(content,BodyLabel("AAC 音频 · 专辑子目录 / 曲名 · 已有文件不覆盖",false));
         TableLayoutPanel card1=Card();Row(content,card1);Row(card1,BodyLabel("01  歌曲链接 · 每行一首",true));
         link=new TextBox();link.AccessibleName="Apple Music 歌曲链接，每行一首";link.Multiline=true;link.AcceptsReturn=true;link.ScrollBars=ScrollBars.Vertical;link.MaxLength=65536;link.Height=70;link.Dock=DockStyle.Top;link.Font=new Font(Font.FontFamily,10.5F);link.Margin=new Padding(0,5,0,10);Row(card1,link);
         FlowLayoutPanel queueButtons=ButtonFlow();addQueue=FlowButton("加入队列",112);addQueue.Click+=delegate{AddInput();};queueButtons.Controls.Add(addQueue);clearQueue=FlowButton("清除已结束项",140);clearQueue.Click+=delegate{queue.ClearFinished();RefreshQueue();};queueButtons.Controls.Add(clearQueue);Row(card1,queueButtons);
@@ -453,7 +472,7 @@ internal sealed class MainWindow : Form {
         queueView=new ListView();queueView.View=View.Details;queueView.FullRowSelect=true;queueView.HideSelection=false;queueView.Height=160;queueView.AccessibleName="下载队列：歌曲、状态、进度";queueView.Columns.Add("歌曲 / 待解析链接",340);queueView.Columns.Add("状态",88);queueView.Columns.Add("进度",90);queueView.ClientSizeChanged+=delegate{ResizeQueueColumns();};Row(card1,queueView);
         destinationLabel=BodyLabel("保存至  "+output,false);Row(card1,destinationLabel);
         FlowLayoutPanel folders=ButtonFlow();changeFolder=FlowButton("更改保存位置…",124);changeFolder.Click+=ChangeDestination;folders.Controls.Add(changeFolder);
-        Button open=FlowButton("打开文件夹",112);open.Click+=delegate{try{Directory.CreateDirectory(output);Process.Start("explorer.exe",Quote(output));}catch{SetStatus("无法打开文件夹，请检查目录权限。",true);}};folders.Controls.Add(open);Row(card1,folders);
+        Button open=FlowButton("打开文件夹",112);open.Click+=delegate{try{Directory.CreateDirectory(output);Process.Start("explorer.exe",Quote(output));}catch{SetStatus("无法打开文件夹，请检查目录权限。",true);}};folders.Controls.Add(open);organize=FlowButton("整理已有歌曲…",160);organize.Click+=StartOrganize;folders.Controls.Add(organize);Row(card1,folders);
         TableLayoutPanel card2=Card();Row(content,card2);Row(card2,BodyLabel("02  登录与隐私",true));
         FlowLayoutPanel loginButtons=ButtonFlow();guide=FlowButton("登录指引",104);guide.Click+=delegate{using(LoginGuide dialog=new LoginGuide(StoreToken)){dialog.ShowDialog(this);}};loginButtons.Controls.Add(guide);
         import=FlowButton("导入文件…",108);import.Click+=ImportLogin;loginButtons.Controls.Add(import);
@@ -474,7 +493,7 @@ internal sealed class MainWindow : Form {
         detail=new Label();detail.Text="每项只接受一首歌；读取信息时不显示虚假百分比。";detail.AutoSize=true;detail.MaximumSize=new Size(10000,0);detail.Dock=DockStyle.Fill;detail.Margin=new Padding(0,4,0,4);detail.AutoEllipsis=true;detail.TextAlign=ContentAlignment.MiddleLeft;detail.ForeColor=Color.FromArgb(103,108,95);footerSurface.Controls.Add(detail,0,2);
         ((SmoothScrollPanel)bodySurface).RegisterNativeScroller(link);((SmoothScrollPanel)bodySurface).RegisterNativeScroller(queueView);
         bodySurface.ClientSizeChanged+=delegate{content.Width=Math.Max(200,bodySurface.ClientSize.Width);WrapLabels(content);ResizeQueueColumns();};
-        timer=new System.Windows.Forms.Timer();timer.Interval=250;timer.Tick+=PollJob;FormClosing+=ClosingWindow;
+        timer=new System.Windows.Forms.Timer();timer.Interval=250;timer.Tick+=PollJob;orgTimer=new System.Windows.Forms.Timer();orgTimer.Interval=250;orgTimer.Tick+=PollOrganize;FormClosing+=ClosingWindow;
         Shown+=delegate{WindowLayout.Fit(this,new Size(720,560));content.Width=bodySurface.ClientSize.Width;WrapLabels(content);CleanupStaleJobs();};
         DpiChanged+=delegate{if(!IsDisposed&&IsHandleCreated)BeginInvoke((MethodInvoker)delegate{WindowLayout.Clamp(this);content.Width=bodySurface.ClientSize.Width;WrapLabels(content);ResizeQueueColumns();});};
     }
@@ -487,7 +506,7 @@ internal sealed class MainWindow : Form {
     private static void WrapLabels(Control parent) {foreach(Control control in parent.Controls){if(control is Label || control is CheckBox)control.MaximumSize=new Size(Math.Max(140,parent.ClientSize.Width-parent.Padding.Horizontal-8),0);if(control.HasChildren)WrapLabels(control);}}
     private static string Quote(string value) { if (value.IndexOf('"') >= 0) throw new Exception("path"); return "\"" + value + "\""; }
     private void SetStatus(string text, bool error) { status.Text = text; status.ForeColor = error ? Color.FromArgb(175,35,55) : Color.FromArgb(35,75,65); }
-    private void SetBusy(bool busy) { download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = true; cancel.Enabled = busy||queue.HasWaiting; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) {progress.Value = 0;progressPercent.Text="—";} }
+    private void SetBusy(bool busy) { if(organize!=null)organize.Enabled=!busy&&!organizing; download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = true; cancel.Enabled = busy||queue.HasWaiting; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) {progress.Value = 0;progressPercent.Text="—";} }
     private void StoreToken(string token) { if(remember.Checked)vault.Save(token);sessionToken=token;login.Text=remember.Checked?"已使用 Windows 当前用户加密保存，仅向 Apple 认证。":(vault.Exists?"新值仅临时使用；旧加密登录仍保留，可点“清除登录”移除。":"已临时导入，关闭工具后需要重新提供。");SetStatus("登录已保存，可以开始下载。",false); }
     private void ImportPath(string path) { try{StoreToken(InputRules.CookieToken(path));}catch{SetStatus("导入失败：请检查 Apple Music Cookie 格式及目录权限。",true);} }
     private void ChangeDestination(object sender,EventArgs args) { using(FolderBrowserDialog dialog=new FolderBrowserDialog()){dialog.Description="选择音频保存文件夹，已有文件不会被覆盖";dialog.SelectedPath=output;if(dialog.ShowDialog(this)!=DialogResult.OK)return;try{ToolSettings.CheckWritable(dialog.SelectedPath);settings.OutputFolder=Path.GetFullPath(dialog.SelectedPath);settings.Save(root);output=settings.OutputFolder;destinationLabel.Text="保存至  "+output;SetStatus("保存位置已更改。",false);}catch{SetStatus("无法使用该文件夹，请检查访问权限。",true);}} }
@@ -526,15 +545,15 @@ internal sealed class MainWindow : Form {
         SetStatus(result.Added==0&&result.Invalid>0?"链接无效：仅接受 music.apple.com 的歌曲链接。":message+"。",result.Invalid>0);
     }
     private void StartDownload(object sender,EventArgs args) {
-        if(queueRunning||process!=null)return;
+        if(queueRunning||process!=null||organizing)return;
         if(!String.IsNullOrWhiteSpace(link.Text))AddInput();
         if(!queue.HasWaiting)return;
         stopQueue=false;queueRunning=true;StartNext();
     }
     private void ContinueQueue() {if(IsDisposed||Disposing)return;if(queueRunning&&!stopQueue&&queue.HasWaiting){BeginInvoke((MethodInvoker)StartNext);}else{queueRunning=false;SetBusy(false);}}
-    private void CancelQueue() {stopQueue=true;queue.CancelWaiting();RefreshQueue();if(process!=null)CancelJob();else{queueRunning=false;SetBusy(false);SetStatus("等待项已取消。",false);}}
+    private void CancelQueue() {if(organizing){CancelOrganize();return;}stopQueue=true;queue.CancelWaiting();RefreshQueue();if(process!=null)CancelJob();else{queueRunning=false;SetBusy(false);SetStatus("等待项已取消。",false);}}
     private void StartNext() {
-        if(!queueRunning||stopQueue||process!=null)return;
+        if(!queueRunning||stopQueue||process!=null||organizing)return;
         if(!queue.HasWaiting){queueRunning=false;SetBusy(false);SetStatus("队列已结束。",false);return;}
         if (!gate.Enter()) return;
         try {
@@ -598,7 +617,7 @@ internal sealed class MainWindow : Form {
         queue.Finish(cancelRequested?"cancelled":success?"success":"error");RefreshQueue();
         if(!clean){queueRunning=false;SetBusy(false);SetStatus("临时文件清理失败，队列已暂停；关闭后检查 private\\jobs。",true);return;}
         if(cancelRequested){SetStatus("当前项已取消，临时登录文件已删除。",false);detail.Text="已完成的音频保留。";}
-        else if(success){SetStatus("当前项完成：AAC 与完整解码校验通过。",false);detail.Text=Path.GetFileName(Convert.ToString(state["file"]));}
+        else if(success){SetStatus("当前项完成：AAC 与完整解码校验通过。",false);detail.Text=(state.ContainsKey("album")?Convert.ToString(state["album"])+" / ":"")+Path.GetFileName(Convert.ToString(state["file"]));}
         else{string category=state!=null&&state.ContainsKey("category")?Convert.ToString(state["category"]):"local_error";SetStatus(ErrorText(category),true);detail.Text="该项失败；继续下一项，不显示原始账户或媒体地址。";}
         ContinueQueue();
         if(success&&!queueRunning){progress.Style=ProgressBarStyle.Continuous;progress.Value=100;progressPercent.Text="100%";}
@@ -626,6 +645,8 @@ internal sealed class MainWindow : Form {
             case "audio_incomplete": case "audio_invalid": return "音频完整性检查未通过，没有保存为完成文件。";
             case "save_failed": case "collision_limit": return "音频保存失败，请检查目标目录权限或重名文件。";
             case "cookie_cleanup": return "临时登录副本清理失败，请检查工具目录。";
+            case "library_busy": return "音乐目录正在下载或整理，请稍后重试。";
+            case "reparse_path":case "unsafe_path":case "root_not_supported":case "not_music_folder":case "album_folder_blocked":case "path_too_long":return "保存目录不可安全归档，请检查路径、长度或专辑同名文件。";
             case "unexpected_media": return "链接未解析为唯一单曲，任务已停止。";
             default: return "下载未成功：可能是曲目、登录或服务限制，可重新导入后重试。";
         }
@@ -644,7 +665,51 @@ internal sealed class MainWindow : Form {
         if (!Directory.Exists(jobsRoot)) return;
         foreach (string dir in Directory.GetDirectories(jobsRoot)) { try { SafeDeleteJob(dir); } catch { SetStatus("发现未清理的临时目录，请检查 private\\jobs。", true); } }
     }
+    private void StartOrganize(object sender,EventArgs args){
+        if(organizing||queueRunning||process!=null){SetStatus("请等待当前下载或整理结束。",true);return;}
+        if(!gate.Enter()){SetStatus("另一项本地操作尚未结束。",true);return;}
+        try{
+            if(!Directory.Exists(output))throw new Exception("folder");
+            var config=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(root,"tool-config.json")));
+            string python=Path.GetFullPath(Path.Combine(root,Convert.ToString(config["python"])));if(!File.Exists(python))throw new Exception("python");
+            orgOutput=output;string parent=Path.Combine(root,"private","organize-jobs");CredentialVault.PrivateDirectory(parent);orgJob=Path.Combine(parent,Guid.NewGuid().ToString("N"));CredentialVault.PrivateDirectory(orgJob);
+            File.WriteAllText(Path.Combine(orgJob,"job.json"),json.Serialize(new Dictionary<string,object>{{"root",orgOutput}}),new UTF8Encoding(false));
+            orgKill=new KillJob();ProcessStartInfo start=new ProcessStartInfo(python,"-I "+Quote(Path.Combine(root,"organizer.py"))+" "+Quote(orgJob));start.WorkingDirectory=root;start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;
+            orgProcess=new Process();orgProcess.StartInfo=start;orgProcess.OutputDataReceived+=delegate{};orgProcess.ErrorDataReceived+=delegate{};orgProcess.Start();orgProcess.BeginOutputReadLine();orgProcess.BeginErrorReadLine();orgKill.Assign(orgProcess);
+            organizing=true;orgCancelling=false;orgPreviewShown=false;SetBusy(true);link.Enabled=false;addQueue.Enabled=false;clearQueue.Enabled=false;cancel.Text="取消整理";SetStatus("正在扫描专辑标签；尚未移动任何文件…",false);detail.Text="完成扫描后先预览，只有明确确认才整理。";
+            File.WriteAllText(Path.Combine(orgJob,"go.flag"),"start");orgTimer.Start();
+        }catch{
+            if(orgKill!=null){orgKill.Dispose();orgKill=null;}if(orgProcess!=null){orgProcess.Dispose();orgProcess=null;}CleanupOrganizeJob();organizing=false;gate.Leave();SetBusy(false);link.Enabled=true;addQueue.Enabled=true;clearQueue.Enabled=true;cancel.Text="取消全部";SetStatus("无法开始整理，请检查目录、Python 与 FFprobe。",true);
+        }
+    }
+    private void CancelOrganize(){if(!organizing||orgCancelling)return;orgCancelling=true;cancel.Enabled=false;try{File.WriteAllText(Path.Combine(orgJob,"cancel.flag"),"cancel");SetStatus("正在停止整理，等待当前文件安全结束…",false);}catch{orgCancelling=false;cancel.Enabled=true;SetStatus("无法写入停止请求；请重试或等待当前操作结束。",true);}}
+    private Dictionary<string,object> OrganizeState(){try{string file=Path.Combine(orgJob,"status.json");return File.Exists(file)?json.Deserialize<Dictionary<string,object>>(File.ReadAllText(file)):null;}catch{return null;}}
+    private void PollOrganize(object sender,EventArgs args){
+        if(orgProcess==null||orgPreviewOpen)return;
+        var state=OrganizeState();
+        if(state!=null){string phase=Convert.ToString(state["phase"]);
+            if(phase=="ready"&&!orgPreviewShown&&!orgCancelling){
+                orgPreviewShown=true;orgPreviewOpen=true;
+                try{var parser=new JavaScriptSerializer();parser.MaxJsonLength=64*1024*1024;var plan=parser.Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(orgJob,"plan.json")));using(OrganizePreview preview=new OrganizePreview(plan,orgOutput)){if(preview.ShowDialog(this)==DialogResult.OK&&!orgProcess.HasExited&&!orgCancelling)File.WriteAllText(Path.Combine(orgJob,"approve.flag"),"approved");else CancelOrganize();}}
+                catch{CancelOrganize();SetStatus("预览无法读取，已取消；没有确认就不会移动。",true);}finally{orgPreviewOpen=false;}
+            }
+            if(phase=="planning"){SetStatus("正在读取本地专辑标签，尚未移动…",false);progress.Style=ProgressBarStyle.Marquee;progressPercent.Text="扫描中";}
+            if(phase=="organizing"){SetStatus("正在按确认的计划整理…",false);int done=Convert.ToInt32(state["done"]),total=Convert.ToInt32(state["total"]);progress.Style=ProgressBarStyle.Continuous;progress.Value=total>0?Math.Min(99,done*100/total):0;progressPercent.Text=progress.Value+"%";detail.Text="已处理 "+done+" / "+total+"，移动 "+state["moved"]+"，失败 "+state["failed"];}
+        }
+        if(!orgProcess.HasExited)return;
+        state=OrganizeState();orgTimer.Stop();if(orgKill!=null){orgKill.Dispose();orgKill=null;}orgProcess.Dispose();orgProcess=null;bool clean=CleanupOrganizeJob();organizing=false;gate.Leave();SetBusy(false);link.Enabled=true;addQueue.Enabled=true;clearQueue.Enabled=true;cancel.Text="取消全部";
+        string final=state!=null?Convert.ToString(state["phase"]):"error";
+        if(final=="done"){SetStatus("整理结束：移动 "+state["moved"]+"，失败 "+state["failed"]+"，已归档 "+state["already"]+"，跳过 "+state["skipped"]+"。",false);progress.Value=100;progressPercent.Text="100%";detail.Text=state.ContainsKey("journal")&&!String.IsNullOrEmpty(Convert.ToString(state["journal"]))?"移动记录在音乐目录："+Convert.ToString(state["journal"]):"无需移动，原文件均已保留。";}
+        else if(final=="cancelled"){SetStatus("整理已取消，已完成的移动保留在记录中。",false);detail.Text=state!=null&&state.ContainsKey("journal")?"记录："+Convert.ToString(state["journal"]):"预览未确认，文件没有移动。";}
+        else{SetStatus("整理未完成，请检查音乐目录占用、路径或本地移动记录。",true);detail.Text=state!=null&&state.ContainsKey("journal")?"已移动 "+state["moved"]+"，记录："+Convert.ToString(state["journal"]):state!=null&&state.ContainsKey("category")?"原因："+Convert.ToString(state["category"]):"已保留音乐，不会显示原始异常日志。";}
+        if(!clean)SetStatus("整理临时计划清理失败；请关闭后检查 private\\organize-jobs。",true);
+    }
+    private bool CleanupOrganizeJob(){
+        if(orgJob==null)return true;try{string full=Path.GetFullPath(orgJob),expected=Path.GetFullPath(Path.Combine(root,"private","organize-jobs"));if(Path.GetDirectoryName(full)!=expected||!Regex.IsMatch(Path.GetFileName(full),"^[0-9a-f]{32}$"))return false;if(Directory.Exists(full)){if((File.GetAttributes(full)&FileAttributes.ReparsePoint)!=0||Directory.GetDirectories(full).Length>0)return false;string[] allowed={"job.json","plan.json","status.json","go.flag","approve.flag","cancel.flag","plan.json.new","status.json.new"};foreach(string file in Directory.GetFiles(full)){if((File.GetAttributes(file)&FileAttributes.ReparsePoint)!=0||Array.IndexOf(allowed,Path.GetFileName(file))<0)return false;}foreach(string file in Directory.GetFiles(full))File.Delete(file);Directory.Delete(full);}orgJob=null;return true;}catch{return false;}
+    }
     private void ClosingWindow(object sender, FormClosingEventArgs args) {
+        if(organizing){args.Cancel=true;CancelOrganize();SetStatus("已请求停止整理；当前文件安全结束后可关闭。",false);return;}
+
         if (((process != null && !process.HasExited)||queue.HasWaiting) && MessageBox.Show(this,"队列尚未结束，取消当前项及等待项并退出？", "退出",MessageBoxButtons.YesNo,MessageBoxIcon.Question) != DialogResult.Yes) { args.Cancel = true; return; }
         stopQueue=true;queueRunning=false;queue.CancelWaiting();timer.Stop(); StopProcess(); CleanupJob(); sessionToken = null;
     }

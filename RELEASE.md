@@ -11,3 +11,5 @@
 The setup/build workflow is documented in README. A new computer must install its own Python/FFmpeg/dependencies and provide fresh local login. Existing credentials are deliberately not portable or included.
 
 The allowlist includes the reviewed opaque-redacted PNG only. Never replace it with an original browser screenshot. Transfer progress adapters and DPI configuration are source files; do not add test renders, executable configuration copies, runtime or user data.
+
+Album organization: source-only modules and synthetic tests are allowlisted. Never publish real music inventories, .applemusic-organizer journals, library lock files, private organize-jobs, fixture audio, settings or generated test outputs. No new dependency or native runtime is bundled.

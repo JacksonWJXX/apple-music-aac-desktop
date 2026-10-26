@@ -15,12 +15,14 @@ sys.path.insert(0, str(ROOT))
 from tool_core import ToolError, parse_song_url, publish_audio, safe_filename
 from transfer_progress import TransferProgress, downloader_progress
 
+from album_library import library_root, library_lock, album_directory, album_component, album_name
+
 STATUS_LOCK = threading.Lock()
 
 
 def status(job, phase, **safe_fields):
     value = {'phase': phase}
-    for key in ('title', 'artist', 'category', 'file', 'duration', 'bytes', 'codec',
+    for key in ('title', 'artist', 'category', 'file', 'duration', 'bytes', 'codec', 'album',
                 'percent', 'bytes_done', 'bytes_total', 'fragments_done', 'fragments_total', 'estimated'):
         if key in safe_fields:
             value[key] = safe_fields[key]
@@ -98,7 +100,7 @@ async def real_download(job, canonical, song_id, ffmpeg):
                     title = attributes.get('name')
                     if not title or str(data.get('id')) != song_id:
                         raise ToolError('metadata')
-                    metadata.update(title=str(title), artist=str(attributes.get('artistName') or '未知歌手'),
+                    metadata.update(album=album_name(attributes.get('albumName')), title=str(title), artist=str(attributes.get('artistName') or '未知歌手'),
                                     expected_duration=float(attributes.get('durationInMillis') or 0) / 1000)
                     status(job, 'downloading', title=safe_filename(title), artist=safe_filename(metadata['artist']))
                 yield item
@@ -133,19 +135,20 @@ def run_job(job, downloader=None, destination=None):
         if not Path(ffmpeg).is_file() or not Path(ffprobe).is_file():
             raise ToolError('dependency')
         os.environ['PATH'] = str(Path(ffmpeg).parent) + os.pathsep + os.environ.get('PATH', '')
-        status(job, 'metadata')
-        metadata = asyncio.run((downloader or real_download)(job, canonical, song_id, ffmpeg))
-        files = list((job / 'staging').rglob('*.m4a'))
-        if len(files) != 1:
-            raise ToolError('download_failed')
-        status(job, 'verifying', title=safe_filename(metadata['title']))
-        duration = verify_audio(files[0], ffmpeg, ffprobe, metadata['expected_duration'])
-        destination = Path(destination) if destination is not None else Path(data['destination'])
-        if not destination.is_absolute() or destination.parent == destination:
-            raise ToolError('save_failed')
-        final = publish_audio(files[0], destination, metadata['title'], metadata['artist'], song_id, work_id=job.name)
-        status(job, 'success', file=str(final), title=safe_filename(metadata['title']),
-               duration=duration, bytes=final.stat().st_size, codec='aac')
+        destination = library_root(Path(destination) if destination is not None else Path(data['destination']), create=True)
+        with library_lock(destination):
+            status(job, 'metadata')
+            metadata = asyncio.run((downloader or real_download)(job, canonical, song_id, ffmpeg))
+            files = list((job / 'staging').rglob('*.m4a'))
+            if len(files) != 1:
+                raise ToolError('download_failed')
+            status(job, 'verifying', title=safe_filename(metadata['title']))
+            duration = verify_audio(files[0], ffmpeg, ffprobe, metadata['expected_duration'])
+            album = album_name(metadata.get('album'))
+            folder = album_directory(destination, album, create=True)
+            final = publish_audio(files[0], folder, metadata['title'], metadata['artist'], song_id, work_id=job.name, temporary_directory=destination)
+            status(job, 'success', file=str(final), title=safe_filename(metadata['title']),
+                   duration=duration, bytes=final.stat().st_size, codec='aac', album=album_component(album,destination))
         return 0
     except ToolError as error:
         status(job, 'error', category=error.category)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+import hashlib
 from pathlib import Path
 import re
 import unicodedata
@@ -44,20 +45,46 @@ def safe_filename(value, fallback='歌曲', limit=100):
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f\ud800-\udfff]', '_', text)
     text = re.sub(r'\s+', ' ', text).strip(' .')
     text = text.encode('utf-16-le')[:limit * 2].decode('utf-16-le', errors='ignore').rstrip(' .') or fallback
-    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', text, re.I):
+    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)', text, re.I):
         text = '_' + text
     return text
 
 
-def publish_audio(source, destination, title, artist, song_id, work_id=None):
+def _units(value):
+    return len(value.encode('utf-16-le')) // 2
+
+
+def _bounded_component(value, limit, fallback='歌曲'):
+    # Device-name protection can prepend '_' after the first truncation.
+    clean = safe_filename(value, fallback, limit)
+    return clean.encode('utf-16-le')[:limit*2].decode('utf-16-le', errors='ignore').rstrip(' .') or '_'
+
+
+def _collision_stem(title, label, budget, ordinal=None):
+    tail = '' if ordinal is None else ' (' + str(ordinal) + ')'
+    label = safe_filename(label, '_', 100)
+    label_budget = budget - 3 - _units(tail) - 1
+    if label_budget < 1:
+        raise ToolError('path_too_long')
+    if _units(label) > label_budget:
+        digest = hashlib.sha256(label.encode('utf-8')).hexdigest()[:8]
+        label = (_bounded_component(label, label_budget-9, '_')+'~'+digest
+                 if label_budget > 9 else digest[:label_budget])
+    suffix = ' - ' + label + tail
+    return _bounded_component(title, budget-_units(suffix)) + suffix
+
+
+def publish_audio(source, destination, title, artist, song_id, work_id=None, temporary_directory=None):
     """Copy across volumes, then atomically publish without replacing files."""
     source, destination = Path(source), Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    title, artist = safe_filename(title), safe_filename(artist, '未知歌手', 45)
-    stems = [title, safe_filename(title + ' - ' + artist, limit=145),
-             safe_filename(title + ' - ' + song_id, limit=145)]
+    budget = min(145, 240-len(str(destination).encode('utf-16-le'))//2-1-4)
+    if budget < 20: raise ToolError('path_too_long')
+    title = _bounded_component(title,min(100,budget))
+    stems = [title, _collision_stem(title,artist,budget),
+             _collision_stem(title,str(song_id),budget)]
     identity = work_id if work_id and re.fullmatch('[0-9a-f]{32}', work_id) else uuid.uuid4().hex
-    temporary = destination / ('.applemusic-' + identity + '.part')
+    temporary = (Path(temporary_directory) if temporary_directory is not None else destination) / ('.applemusic-' + identity + '.part')
     owned = False
     try:
         with temporary.open('xb') as output, source.open('rb') as input_file:
@@ -66,7 +93,7 @@ def publish_audio(source, destination, title, artist, song_id, work_id=None):
             output.flush()
             os.fsync(output.fileno())
         for number in range(1000):
-            stem = stems[number] if number < 3 else safe_filename(title + ' - ' + song_id + ' (' + str(number - 1) + ')', limit=145)
+            stem = stems[number] if number < 3 else _collision_stem(title,str(song_id),budget,number-1)
             target = destination / (stem + '.m4a')
             try:
                 if os.name == 'nt':
