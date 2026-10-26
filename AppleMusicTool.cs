@@ -232,6 +232,35 @@ internal sealed class CandidatePicker : Form {
     }
 }
 
+internal sealed class SongQueueItem {
+    public string Id,Url,Title,State="waiting",Progress="—";
+    public bool Terminal {get{return State=="success"||State=="error"||State=="cancelled";}}
+}
+internal sealed class QueueAddResult {public int Added,Invalid,Duplicate,Full;}
+internal sealed class SongQueue {
+    public const int Limit=100;
+    public readonly List<SongQueueItem> Items=new List<SongQueueItem>();
+    public SongQueueItem Current {get;private set;}
+    public bool HasWaiting {get{foreach(var item in Items)if(item.State=="waiting")return true;return false;}}
+    public QueueAddResult AddLines(string text) {
+        var result=new QueueAddResult();
+        if(text.Length>65536){result.Invalid=1;return result;}
+        foreach(string line in text.Split(new[]{'\r','\n'},StringSplitOptions.RemoveEmptyEntries)) {
+            if(String.IsNullOrWhiteSpace(line))continue;
+            string id,url;try{url=InputRules.SongUrl(line.Trim(),out id);}catch{result.Invalid++;continue;}
+            bool duplicate=false;foreach(var item in Items)if(item.Id==id){duplicate=true;break;}
+            if(duplicate){result.Duplicate++;continue;}
+            if(Items.Count>=Limit){result.Full++;continue;}
+            Items.Add(new SongQueueItem{Id=id,Url=url,Title=url});result.Added++;
+        }
+        return result;
+    }
+    public SongQueueItem TakeNext() {if(Current!=null)return null;foreach(var item in Items)if(item.State=="waiting"){Current=item;item.State="metadata";return item;}return null;}
+    public void Finish(string state) {if(Current==null)return;if(state!="success"&&state!="error"&&state!="cancelled")throw new ArgumentException("state");Current.State=state;Current.Progress=state=="success"?"100%":"—";Current=null;}
+    public void CancelWaiting() {foreach(var item in Items)if(item.State=="waiting"){item.State="cancelled";item.Progress="—";}}
+    public void ClearFinished() {Items.RemoveAll(delegate(SongQueueItem item){return item.Terminal;});}
+}
+
 internal sealed class MainWindow : Form {
     private readonly string root, jobsRoot;
     private string output, activeOutput;
@@ -242,6 +271,11 @@ internal sealed class MainWindow : Form {
     private TextBox link; private Label login, status, detail, progressPercent;
     private Panel bodySurface; private TableLayoutPanel footerSurface;
     private string currentTitle;
+    private readonly SongQueue queue=new SongQueue();
+    private ListView queueView;
+    private Button addQueue,clearQueue;
+    private bool queueRunning,stopQueue;
+    private readonly Dictionary<SongQueueItem,ListViewItem> queueRows=new Dictionary<SongQueueItem,ListViewItem>();
     private Button download, cancel, import, clear, guide, scan, changeFolder; private Label destinationLabel; private CheckBox remember;
     private ProgressBar progress; private System.Windows.Forms.Timer timer;
     private Process process; private KillJob killJob; private string jobFolder, sessionToken;
@@ -253,13 +287,16 @@ internal sealed class MainWindow : Form {
         Text="Apple Music AAC 下载器";Font=new Font("Microsoft YaHei UI",9.5F);AutoScaleDimensions=new SizeF(96F,96F);AutoScaleMode=AutoScaleMode.Dpi;
         BackColor=Color.FromArgb(250,249,245);ForeColor=Color.FromArgb(48,53,43);FormBorderStyle=FormBorderStyle.Sizable;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
         Size=WindowLayout.FitSize(Screen.PrimaryScreen.WorkingArea,new Size(720,560));
-        TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Absolute,120));Controls.Add(shell);
+        TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));Controls.Add(shell);
         bodySurface=new Panel();bodySurface.Dock=DockStyle.Fill;bodySurface.AutoScroll=true;bodySurface.Margin=Padding.Empty;shell.Controls.Add(bodySurface,0,0);
         TableLayoutPanel content=Stack(BackColor);content.Padding=new Padding(18,14,18,8);bodySurface.Controls.Add(content);
-        Label heading=BodyLabel("Apple Music 单曲下载",true);heading.Font=new Font(Font.FontFamily,18,FontStyle.Bold);Row(content,heading);
+        Label heading=BodyLabel("Apple Music 下载队列",true);heading.Font=new Font(Font.FontFamily,18,FontStyle.Bold);Row(content,heading);
         Row(content,BodyLabel("AAC 音频 · 按歌曲名保存 · 已有文件不覆盖",false));
-        TableLayoutPanel card1=Card();Row(content,card1);Row(card1,BodyLabel("01  单曲链接",true));
-        link=new TextBox();link.AccessibleName="Apple Music 单曲链接";link.Dock=DockStyle.Top;link.Font=new Font(Font.FontFamily,10.5F);link.Margin=new Padding(0,5,0,10);Row(card1,link);
+        TableLayoutPanel card1=Card();Row(content,card1);Row(card1,BodyLabel("01  歌曲链接 · 每行一首",true));
+        link=new TextBox();link.AccessibleName="Apple Music 歌曲链接，每行一首";link.Multiline=true;link.AcceptsReturn=true;link.ScrollBars=ScrollBars.Vertical;link.MaxLength=65536;link.Height=70;link.Dock=DockStyle.Top;link.Font=new Font(Font.FontFamily,10.5F);link.Margin=new Padding(0,5,0,10);Row(card1,link);
+        FlowLayoutPanel queueButtons=ButtonFlow();addQueue=FlowButton("加入队列",112);addQueue.Click+=delegate{AddInput();};queueButtons.Controls.Add(addQueue);clearQueue=FlowButton("清除已结束项",140);clearQueue.Click+=delegate{queue.ClearFinished();RefreshQueue();};queueButtons.Controls.Add(clearQueue);Row(card1,queueButtons);
+        Row(card1,BodyLabel("可直接下载一首，或粘贴多行后加入队列；默认逐首下载。",false));
+        queueView=new ListView();queueView.View=View.Details;queueView.FullRowSelect=true;queueView.HideSelection=false;queueView.Height=160;queueView.AccessibleName="下载队列：歌曲、状态、进度";queueView.Columns.Add("歌曲 / 待解析链接",340);queueView.Columns.Add("状态",88);queueView.Columns.Add("进度",90);queueView.ClientSizeChanged+=delegate{ResizeQueueColumns();};Row(card1,queueView);
         destinationLabel=BodyLabel("保存至  "+output,false);Row(card1,destinationLabel);
         FlowLayoutPanel folders=ButtonFlow();changeFolder=FlowButton("更改保存位置…",124);changeFolder.Click+=ChangeDestination;folders.Controls.Add(changeFolder);
         Button open=FlowButton("打开文件夹",112);open.Click+=delegate{try{Directory.CreateDirectory(output);Process.Start("explorer.exe",Quote(output));}catch{SetStatus("无法打开文件夹，请检查目录权限。",true);}};folders.Controls.Add(open);Row(card1,folders);
@@ -272,30 +309,30 @@ internal sealed class MainWindow : Form {
         Row(card2,BodyLabel("取消勾选不会删除已有登录；需移除请点“清除登录”。",false));
         login=BodyLabel(vault.Exists?"已保存加密登录；仅在点击下载时使用。":"首次使用请打开“登录指引”，粘贴你自己的 Cookie 值。",false);Row(card2,login);
         Label privacy=BodyLabel("不读取浏览器凭据；任务结束或取消后删除临时副本。",false);privacy.ForeColor=Color.FromArgb(103,108,95);Row(card2,privacy);
-        footerSurface=new TableLayoutPanel();footerSurface.Dock=DockStyle.Fill;footerSurface.Padding=new Padding(18,6,18,8);footerSurface.Margin=Padding.Empty;footerSurface.ColumnCount=1;footerSurface.RowCount=3;footerSurface.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.RowStyles.Add(new RowStyle(SizeType.Absolute,42));footerSurface.RowStyles.Add(new RowStyle(SizeType.Absolute,24));footerSurface.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.Controls.Add(footerSurface,0,1);
-        TableLayoutPanel actions=new TableLayoutPanel();actions.Dock=DockStyle.Fill;actions.ColumnCount=3;actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,132));actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,88));actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.Controls.Add(actions,0,0);
-        download=FlowButton("下载单曲",124);download.Dock=DockStyle.Fill;download.BackColor=Color.FromArgb(91,108,76);download.ForeColor=Color.White;download.Click+=StartDownload;actions.Controls.Add(download,0,0);
-        cancel=FlowButton("取消",80);cancel.Dock=DockStyle.Fill;cancel.Enabled=false;cancel.Click+=delegate{CancelJob();};actions.Controls.Add(cancel,1,0);
+        footerSurface=new TableLayoutPanel();footerSurface.AutoSize=true;footerSurface.AutoSizeMode=AutoSizeMode.GrowAndShrink;footerSurface.MinimumSize=new Size(0,128);footerSurface.Dock=DockStyle.Fill;footerSurface.Padding=new Padding(18,6,18,8);footerSurface.Margin=Padding.Empty;footerSurface.ColumnCount=1;footerSurface.RowCount=3;footerSurface.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.RowStyles.Add(new RowStyle(SizeType.AutoSize));footerSurface.RowStyles.Add(new RowStyle(SizeType.AutoSize));footerSurface.RowStyles.Add(new RowStyle(SizeType.AutoSize));shell.Controls.Add(footerSurface,0,1);
+        TableLayoutPanel actions=new TableLayoutPanel();actions.Dock=DockStyle.Fill;actions.ColumnCount=3;actions.AutoSize=true;actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.Controls.Add(actions,0,0);
+        download=FlowButton("开始下载",124);download.Dock=DockStyle.Fill;download.BackColor=Color.FromArgb(91,108,76);download.ForeColor=Color.White;download.Click+=StartDownload;actions.Controls.Add(download,0,0);
+        cancel=FlowButton("取消全部",80);cancel.Dock=DockStyle.Fill;cancel.Enabled=false;cancel.Click+=delegate{CancelQueue();};actions.Controls.Add(cancel,1,0);
         status=new Label();status.Text="准备就绪";status.AutoEllipsis=true;status.Dock=DockStyle.Fill;status.TextAlign=ContentAlignment.MiddleLeft;status.Margin=new Padding(8,0,0,0);actions.Controls.Add(status,2,0);
-        TableLayoutPanel meter=new TableLayoutPanel();meter.Dock=DockStyle.Fill;meter.ColumnCount=2;meter.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));meter.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,76));footerSurface.Controls.Add(meter,0,1);
-        progress=new ProgressBar();progress.Dock=DockStyle.Fill;progress.Margin=new Padding(0,7,8,7);progress.Style=ProgressBarStyle.Continuous;meter.Controls.Add(progress,0,0);
-        progressPercent=new Label();progressPercent.Text="—";progressPercent.Dock=DockStyle.Fill;progressPercent.TextAlign=ContentAlignment.MiddleRight;meter.Controls.Add(progressPercent,1,0);
-        detail=new Label();detail.Text="只接受单曲；读取信息时不显示虚假百分比。";detail.Dock=DockStyle.Fill;detail.AutoEllipsis=true;detail.TextAlign=ContentAlignment.MiddleLeft;detail.ForeColor=Color.FromArgb(103,108,95);footerSurface.Controls.Add(detail,0,2);
-        bodySurface.ClientSizeChanged+=delegate{content.Width=Math.Max(200,bodySurface.ClientSize.Width);WrapLabels(content);};
+        TableLayoutPanel meter=new TableLayoutPanel();meter.Dock=DockStyle.Fill;meter.AutoSize=true;meter.AutoSizeMode=AutoSizeMode.GrowAndShrink;meter.MinimumSize=new Size(0,34);meter.Margin=Padding.Empty;meter.Padding=Padding.Empty;meter.ColumnCount=2;meter.RowCount=1;meter.RowStyles.Add(new RowStyle(SizeType.AutoSize));meter.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));meter.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,100));footerSurface.Controls.Add(meter,0,1);
+        progress=new ProgressBar();progress.Dock=DockStyle.Fill;progress.Margin=new Padding(0,3,8,3);progress.Style=ProgressBarStyle.Continuous;meter.Controls.Add(progress,0,0);
+        progressPercent=new Label();progressPercent.AutoSize=true;progressPercent.Text="—";progressPercent.Margin=Padding.Empty;progressPercent.Dock=DockStyle.Fill;progressPercent.TextAlign=ContentAlignment.MiddleRight;meter.Controls.Add(progressPercent,1,0);
+        detail=new Label();detail.Text="每项只接受一首歌；读取信息时不显示虚假百分比。";detail.AutoSize=true;detail.MaximumSize=new Size(10000,0);detail.Dock=DockStyle.Fill;detail.Margin=new Padding(0,4,0,4);detail.AutoEllipsis=true;detail.TextAlign=ContentAlignment.MiddleLeft;detail.ForeColor=Color.FromArgb(103,108,95);footerSurface.Controls.Add(detail,0,2);
+        bodySurface.ClientSizeChanged+=delegate{content.Width=Math.Max(200,bodySurface.ClientSize.Width);WrapLabels(content);ResizeQueueColumns();};
         timer=new System.Windows.Forms.Timer();timer.Interval=250;timer.Tick+=PollJob;FormClosing+=ClosingWindow;
         Shown+=delegate{WindowLayout.Fit(this,new Size(720,560));content.Width=bodySurface.ClientSize.Width;WrapLabels(content);CleanupStaleJobs();};
-        DpiChanged+=delegate{if(!IsDisposed&&IsHandleCreated)BeginInvoke((MethodInvoker)delegate{WindowLayout.Clamp(this);content.Width=bodySurface.ClientSize.Width;WrapLabels(content);});};
+        DpiChanged+=delegate{if(!IsDisposed&&IsHandleCreated)BeginInvoke((MethodInvoker)delegate{WindowLayout.Clamp(this);content.Width=bodySurface.ClientSize.Width;WrapLabels(content);ResizeQueueColumns();});};
     }
     private TableLayoutPanel Stack(Color color) {TableLayoutPanel panel=new TableLayoutPanel();panel.ColumnCount=1;panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));panel.AutoSize=true;panel.AutoSizeMode=AutoSizeMode.GrowAndShrink;panel.Dock=DockStyle.Top;panel.Margin=Padding.Empty;panel.BackColor=color;return panel;}
     private TableLayoutPanel Card() {TableLayoutPanel card=Stack(Color.FromArgb(240,238,230));card.Padding=new Padding(12);card.Margin=new Padding(0,10,0,0);return card;}
     private static void Row(TableLayoutPanel panel,Control control) {int row=panel.RowCount++;panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));control.Dock=DockStyle.Top;panel.Controls.Add(control,0,row);}
     private Label BodyLabel(string text,bool bold) {Label label=new Label();label.Text=text;label.AutoSize=true;label.Dock=DockStyle.Top;label.Margin=new Padding(0,3,0,5);label.BackColor=Color.Transparent;if(bold)label.Font=new Font(Font.FontFamily,10,FontStyle.Bold);return label;}
     private FlowLayoutPanel ButtonFlow() {FlowLayoutPanel flow=new FlowLayoutPanel();flow.AutoSize=true;flow.WrapContents=true;flow.Dock=DockStyle.Top;flow.Margin=new Padding(0,4,0,4);return flow;}
-    private Button FlowButton(string text,int width) {Button button=new Button();button.Text=text;button.Size=new Size(width,34);button.Margin=new Padding(0,0,8,4);button.FlatStyle=FlatStyle.Flat;button.FlatAppearance.BorderColor=Color.FromArgb(196,198,183);button.BackColor=Color.FromArgb(250,249,245);button.ForeColor=Color.FromArgb(48,53,43);button.Cursor=Cursors.Hand;button.AccessibleName=text;return button;}
+    private Button FlowButton(string text,int width) {Button button=new Button();button.Text=text;button.AutoSize=true;button.AutoSizeMode=AutoSizeMode.GrowAndShrink;button.MinimumSize=new Size(width,34);button.Padding=new Padding(8,4,8,4);button.Margin=new Padding(0,0,8,4);button.FlatStyle=FlatStyle.Flat;button.FlatAppearance.BorderColor=Color.FromArgb(196,198,183);button.BackColor=Color.FromArgb(250,249,245);button.ForeColor=Color.FromArgb(48,53,43);button.Cursor=Cursors.Hand;button.AccessibleName=text;return button;}
     private static void WrapLabels(Control parent) {foreach(Control control in parent.Controls){if(control is Label || control is CheckBox)control.MaximumSize=new Size(Math.Max(140,parent.ClientSize.Width-parent.Padding.Horizontal-8),0);if(control.HasChildren)WrapLabels(control);}}
     private static string Quote(string value) { if (value.IndexOf('"') >= 0) throw new Exception("path"); return "\"" + value + "\""; }
     private void SetStatus(string text, bool error) { status.Text = text; status.ForeColor = error ? Color.FromArgb(175,35,55) : Color.FromArgb(35,75,65); }
-    private void SetBusy(bool busy) { download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = !busy; cancel.Enabled = busy; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) {progress.Value = 0;progressPercent.Text="—";} }
+    private void SetBusy(bool busy) { download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = true; cancel.Enabled = busy||queue.HasWaiting; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) {progress.Value = 0;progressPercent.Text="—";} }
     private void StoreToken(string token) { if(remember.Checked)vault.Save(token);sessionToken=token;login.Text=remember.Checked?"已使用 Windows 当前用户加密保存，仅向 Apple 认证。":(vault.Exists?"新值仅临时使用；旧加密登录仍保留，可点“清除登录”移除。":"已临时导入，关闭工具后需要重新提供。");SetStatus("登录已保存，可以开始下载。",false); }
     private void ImportPath(string path) { try{StoreToken(InputRules.CookieToken(path));}catch{SetStatus("导入失败：请检查 Apple Music Cookie 格式及目录权限。",true);} }
     private void ChangeDestination(object sender,EventArgs args) { using(FolderBrowserDialog dialog=new FolderBrowserDialog()){dialog.Description="选择音频保存文件夹，已有文件不会被覆盖";dialog.SelectedPath=output;if(dialog.ShowDialog(this)!=DialogResult.OK)return;try{ToolSettings.CheckWritable(dialog.SelectedPath);settings.OutputFolder=Path.GetFullPath(dialog.SelectedPath);settings.Save(root);output=settings.OutputFolder;destinationLabel.Text="保存至  "+output;SetStatus("保存位置已更改。",false);}catch{SetStatus("无法使用该文件夹，请检查访问权限。",true);}} }
@@ -305,9 +342,9 @@ internal sealed class MainWindow : Form {
         using(FolderBrowserDialog dialog=new FolderBrowserDialog()){dialog.Description="选择你保存 Cookies 文本的下载文件夹；只扫描当前层，不进入子文件夹或浏览器目录";if(!String.IsNullOrEmpty(settings.ScanFolder))dialog.SelectedPath=settings.ScanFolder;if(dialog.ShowDialog(this)!=DialogResult.OK){gate.Leave();return;}chosen=dialog.SelectedPath;}
         if(!CookieScan.AllowedFolder(chosen)){SetStatus("请选择自己拥有的 Download(s)/下载目录；不扫描 AppData 或浏览器目录。",true);gate.Leave();return;}
         settings.ScanFolder=chosen;try{settings.Save(root);}catch{SetStatus("无法保存扫描位置。",true);gate.Leave();return;}
-        string imports=Path.Combine(root,"import");Directory.CreateDirectory(imports);SetBusy(true);cancel.Enabled=false;SetStatus("正在匹配指定目录中的 Cookies 文本…",false);
+        string imports=Path.Combine(root,"import");Directory.CreateDirectory(imports);SetBusy(true);cancel.Enabled=false;addQueue.Enabled=false;clearQueue.Enabled=false;SetStatus("正在匹配指定目录中的 Cookies 文本…",false);
         BackgroundWorker worker=new BackgroundWorker();worker.DoWork+=delegate(object s,DoWorkEventArgs e){e.Result=CookieScan.Find(imports,chosen);};
-        worker.RunWorkerCompleted+=delegate(object s,RunWorkerCompletedEventArgs e){SetBusy(false);gate.Leave();if(e.Error!=null){SetStatus("扫描未完成，请检查目录权限。",true);return;}var candidates=(List<CookieCandidate>)e.Result;if(candidates.Count==0){SetStatus("未找到匹配文件，可直接使用“登录指引”。",false);return;}using(CandidatePicker picker=new CandidatePicker(candidates)){if(picker.ShowDialog(this)==DialogResult.OK)ImportPath(picker.SelectedPath);}worker.Dispose();};worker.RunWorkerAsync();
+        worker.RunWorkerCompleted+=delegate(object s,RunWorkerCompletedEventArgs e){if(IsDisposed||Disposing){gate.Leave();worker.Dispose();return;}addQueue.Enabled=true;clearQueue.Enabled=true;SetBusy(false);gate.Leave();if(e.Error!=null){SetStatus("扫描未完成，请检查目录权限。",true);return;}var candidates=(List<CookieCandidate>)e.Result;if(candidates.Count==0){SetStatus("未找到匹配文件，可直接使用“登录指引”。",false);return;}using(CandidatePicker picker=new CandidatePicker(candidates)){if(picker.ShowDialog(this)==DialogResult.OK)ImportPath(picker.SelectedPath);}worker.Dispose();};worker.RunWorkerAsync();
     }
     private void ImportLogin(object sender, EventArgs args) {
         using (OpenFileDialog dialog = new OpenFileDialog()) {
@@ -320,13 +357,37 @@ internal sealed class MainWindow : Form {
         if (MessageBox.Show(this, "清除本工具保存的登录？下次下载需要重新导入。不会删除你选择的源文件。", "清除登录", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         try { vault.Clear(); sessionToken = null; login.Text = "登录已清除，需要时请重新导入。"; SetStatus("已清除本工具的登录。", false); } catch { SetStatus("清除失败，请检查工具目录权限。", true); }
     }
-    private void StartDownload(object sender, EventArgs args) {
+    private void ResizeQueueColumns() {if(queueView==null||queueView.Columns.Count<3)return;float scale=DeviceDpi/96F;int state=(int)(96*scale),pct=(int)(100*scale);queueView.Columns[1].Width=state;queueView.Columns[2].Width=pct;queueView.Columns[0].Width=Math.Max((int)(160*scale),queueView.ClientSize.Width-state-pct-6);}
+    private static string QueueState(string state) {switch(state){case "waiting":return "等待";case "metadata":return "读取信息";case "downloading":return "下载中";case "processing":return "处理中";case "verifying":return "校验中";case "success":return "完成";case "error":return "失败";case "cancelled":return "已取消";default:return "等待";}}
+    private void RefreshQueue() {
+        queueView.BeginUpdate();
+        var removed=new List<SongQueueItem>();foreach(var pair in queueRows)if(!queue.Items.Contains(pair.Key)){queueView.Items.Remove(pair.Value);removed.Add(pair.Key);}foreach(var item in removed)queueRows.Remove(item);
+        foreach(var item in queue.Items){ListViewItem row;if(!queueRows.TryGetValue(item,out row)){row=new ListViewItem(new[]{item.Title,QueueState(item.State),item.Progress});queueView.Items.Add(row);queueRows[item]=row;}row.Text=item.Title;row.SubItems[1].Text=QueueState(item.State);row.SubItems[2].Text=item.Progress;}
+        queueView.EndUpdate();ResizeQueueColumns();
+    }
+    private void AddInput() {
+        QueueAddResult result=queue.AddLines(link.Text);if(result.Added>0)link.Clear();RefreshQueue();if(process==null)cancel.Enabled=queue.HasWaiting;
+        string message="加入 "+result.Added+" 首";if(result.Duplicate>0)message+="；重复跳过 "+result.Duplicate;if(result.Invalid>0)message+="；无效链接 "+result.Invalid;if(result.Full>0)message+="；队列最多 "+SongQueue.Limit+" 项";
+        SetStatus(result.Added==0&&result.Invalid>0?"链接无效：仅接受 music.apple.com 的歌曲链接。":message+"。",result.Invalid>0);
+    }
+    private void StartDownload(object sender,EventArgs args) {
+        if(queueRunning||process!=null)return;
+        if(!String.IsNullOrWhiteSpace(link.Text))AddInput();
+        if(!queue.HasWaiting)return;
+        stopQueue=false;queueRunning=true;StartNext();
+    }
+    private void ContinueQueue() {if(IsDisposed||Disposing)return;if(queueRunning&&!stopQueue&&queue.HasWaiting){BeginInvoke((MethodInvoker)StartNext);}else{queueRunning=false;SetBusy(false);}}
+    private void CancelQueue() {stopQueue=true;queue.CancelWaiting();RefreshQueue();if(process!=null)CancelJob();else{queueRunning=false;SetBusy(false);SetStatus("等待项已取消。",false);}}
+    private void StartNext() {
+        if(!queueRunning||stopQueue||process!=null)return;
+        if(!queue.HasWaiting){queueRunning=false;SetBusy(false);SetStatus("队列已结束。",false);return;}
         if (!gate.Enter()) return;
         try {
-            string id; string canonical = InputRules.SongUrl(link.Text, out id);
             string token = sessionToken;
             if (token == null && vault.Exists) token = vault.Load();
-            if (String.IsNullOrEmpty(token)) { SetStatus("请先点击“导入登录文件”。", true); gate.Leave(); return; }
+            if (String.IsNullOrEmpty(token)) {queueRunning=false;SetBusy(false);SetStatus("请先使用登录指引或导入登录文件，再开始队列。",true);gate.Leave();return;}
+            SongQueueItem next=queue.TakeNext();if(next==null){gate.Leave();return;}RefreshQueue();
+            string canonical=next.Url,id=next.Id;
             var config = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(root,"tool-config.json")));
             string python = Path.GetFullPath(Path.Combine(root, Convert.ToString(config["python"])));
             if (!File.Exists(python)) throw new Exception("dependency");
@@ -346,8 +407,11 @@ internal sealed class MainWindow : Form {
             File.WriteAllText(Path.Combine(jobFolder,"go.flag"), "start");
             cancelRequested = false; previousPhase = ""; currentTitle=null; started = DateTime.UtcNow; SetBusy(true); SetStatus("正在连接 Apple 并读取单曲信息…", false); detail.Text = "临时登录副本仅用于当前任务。"; timer.Start();
         } catch (Exception error) {
-            StopProcess(); CleanupJob(); gate.Leave(); SetBusy(false);
+            bool hadItem=queue.Current!=null;StopProcess();bool cleaned=CleanupJob();queue.Finish("error");RefreshQueue();gate.Leave();
+            if(!hadItem){queueRunning=false;SetBusy(false);SetStatus("无法读取登录资料，队列未启动；请清除后重新登录。",true);return;}
+            if(!cleaned){queueRunning=false;SetBusy(false);SetStatus("临时文件清理失败，队列已暂停；关闭后检查 private\\jobs。",true);return;}
             SetStatus(error.Message == "invalid_url" ? "链接无效：请使用 music.apple.com 的单曲链接。" : "无法启动任务：请检查登录、目录权限及工具运行环境。", true);
+            ContinueQueue();
         }
     }
     private void CancelJob() { if (process == null || cancelRequested) return; cancelRequested = true; cancel.Enabled = false; if (killJob != null) { killJob.Dispose(); killJob = null; } SetStatus("正在取消并清理临时登录文件…", false); }
@@ -366,20 +430,29 @@ internal sealed class MainWindow : Form {
                 if (state.ContainsKey("title")) currentTitle=Convert.ToString(state["title"]);
             }
         }
-        if(state!=null&&!cancelRequested)UpdateProgress(state);
+        if(state!=null&&!cancelRequested){
+            if(state.ContainsKey("title"))currentTitle=Convert.ToString(state["title"]);
+            if(queue.Current!=null){if(currentTitle!=null)queue.Current.Title=currentTitle;string phase=Convert.ToString(state["phase"]);if(phase=="metadata"||phase=="downloading"||phase=="processing"||phase=="verifying")queue.Current.State=phase;}
+            UpdateProgress(state);if(queue.Current!=null)queue.Current.Progress=progressPercent.Text;RefreshQueue();
+        }
         if (!process.HasExited) return;
-        timer.Stop(); state = ReadState(); bool clean = CleanupJob();
-        if (killJob != null) { killJob.Dispose(); killJob = null; } process.Dispose(); process = null; SetBusy(false); gate.Leave();
-        if (!clean) { SetStatus("临时文件清理失败，请关闭工具后检查 private\\jobs 文件夹。", true); return; }
-        if (cancelRequested) { SetStatus("任务已取消，临时登录副本已删除。", false); detail.Text = "已完成的音频会保留；可在文件夹中查看。"; return; }
-        if (state != null && Convert.ToString(state["phase"]) == "success") { SetStatus("下载完成，AAC 格式和完整解码检查通过。", false); detail.Text = Path.GetFileName(Convert.ToString(state["file"])); progress.Value = 100;progressPercent.Text="100%"; }
-        else { string category = state != null && state.ContainsKey("category") ? Convert.ToString(state["category"]) : "local_error"; SetStatus(ErrorText(category), true); detail.Text = "不会显示原始账户、媒体地址或解密日志。"; }
+        timer.Stop(); state=ReadState();int exitCode=process.ExitCode;bool clean=CleanupJob();
+        if(killJob!=null){killJob.Dispose();killJob=null;}process.Dispose();process=null;gate.Leave();
+        bool success=state!=null&&Convert.ToString(state["phase"])=="success"&&exitCode==0;
+        if(queue.Current!=null&&state!=null&&state.ContainsKey("title"))queue.Current.Title=Convert.ToString(state["title"]);
+        queue.Finish(cancelRequested?"cancelled":success?"success":"error");RefreshQueue();
+        if(!clean){queueRunning=false;SetBusy(false);SetStatus("临时文件清理失败，队列已暂停；关闭后检查 private\\jobs。",true);return;}
+        if(cancelRequested){SetStatus("当前项已取消，临时登录文件已删除。",false);detail.Text="已完成的音频保留。";}
+        else if(success){SetStatus("当前项完成：AAC 与完整解码校验通过。",false);detail.Text=Path.GetFileName(Convert.ToString(state["file"]));}
+        else{string category=state!=null&&state.ContainsKey("category")?Convert.ToString(state["category"]):"local_error";SetStatus(ErrorText(category),true);detail.Text="该项失败；继续下一项，不显示原始账户或媒体地址。";}
+        ContinueQueue();
+        if(success&&!queueRunning){progress.Style=ProgressBarStyle.Continuous;progress.Value=100;progressPercent.Text="100%";}
     }
     private static string BytesText(double value) {return value>=1048576?(value/1048576).ToString("0.0")+" MiB":value>=1024?(value/1024).ToString("0.0")+" KiB":value.ToString("0")+" B";}
     private void UpdateProgress(Dictionary<string,object> state) {
         string phase=Convert.ToString(state["phase"]);
         if(phase=="downloading"&&state.ContainsKey("percent")) {
-            double percent=Convert.ToDouble(state["percent"]);progress.Style=ProgressBarStyle.Continuous;progress.Value=Math.Max(0,Math.Min(99,(int)percent));progressPercent.Text=(state.ContainsKey("estimated")?"约 ":"")+percent.ToString("0.0")+"%";
+            double percent=Math.Max(0,Math.Min(99.9,Convert.ToDouble(state["percent"])));progress.Style=ProgressBarStyle.Continuous;progress.Value=Math.Max(0,Math.Min(99,(int)percent));progressPercent.Text=(state.ContainsKey("estimated")?"约 ":"")+percent.ToString("0.0")+"%";
         } else {progress.Style=ProgressBarStyle.Marquee;progressPercent.Text=phase=="verifying"?"校验中":phase=="processing"?"整理中":"—";}
         if(state.ContainsKey("bytes_done")) {
             string counters="已传输 "+BytesText(Convert.ToDouble(state["bytes_done"]));
@@ -417,8 +490,8 @@ internal sealed class MainWindow : Form {
         foreach (string dir in Directory.GetDirectories(jobsRoot)) { try { SafeDeleteJob(dir); } catch { SetStatus("发现未清理的临时目录，请检查 private\\jobs。", true); } }
     }
     private void ClosingWindow(object sender, FormClosingEventArgs args) {
-        if (process != null && !process.HasExited && MessageBox.Show(this,"下载进行中，取消任务并退出？", "退出",MessageBoxButtons.YesNo,MessageBoxIcon.Question) != DialogResult.Yes) { args.Cancel = true; return; }
-        timer.Stop(); StopProcess(); CleanupJob(); sessionToken = null;
+        if (((process != null && !process.HasExited)||queue.HasWaiting) && MessageBox.Show(this,"队列尚未结束，取消当前项及等待项并退出？", "退出",MessageBoxButtons.YesNo,MessageBoxIcon.Question) != DialogResult.Yes) { args.Cancel = true; return; }
+        stopQueue=true;queueRunning=false;queue.CancelWaiting();timer.Stop(); StopProcess(); CleanupJob(); sessionToken = null;
     }
     public void RenderPreview(string path) { ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; Location = new Point(-32000,-32000); Show(); Application.DoEvents(); using(Bitmap bitmap = new Bitmap(Width,Height)) { DrawToBitmap(bitmap,new Rectangle(0,0,Width,Height)); bitmap.Save(path); } Hide(); }
     public bool TestInvalidLink() { link.Text = "https://example.invalid/song/1"; StartDownload(this,EventArgs.Empty); return process == null && status.Text.StartsWith("链接无效"); }

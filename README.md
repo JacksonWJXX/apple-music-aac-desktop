@@ -95,3 +95,31 @@ A source-only Windows desktop frontend for one-song AAC downloads using the pinn
 登录指引内附下图，可点击放大。全部 Cookie 值已不可逆遮盖；按图找到自己浏览器中的位置，再私下复制自己的 `media-user-token` 值。
 
 ![已遮盖所有 Cookie 值的操作位置图](assets/cookie-guide-redacted.png)
+
+## 多首队列
+
+输入框每行粘贴一个歌曲链接，点击“加入队列”检查并加入；也可以输入一首后直接点“开始下载”。队列默认串行，不同时启动多个下载进程。下载时可继续加入链接；保存位置和登录设置在当前队列运行时锁定。
+
+队列显示待解析的规范链接，读取到歌曲名后替换为名称，同时显示等待、读取信息、下载中、处理中、校验中、完成、失败或已取消。只有音频验证完成的项目显示 100%。单项失败会继续下一项；缺少或无法读取登录资料时不发起下载，保留等待项，重新登录后可再次开始。临时凭据清理失败时暂停队列，先处理本地文件问题。
+
+同一歌曲编号在列表中只保留一次，不区分链接中的国家地区或标题写法。无效链接跳过并显示数量，不请求其地址。列表最多 100 项、粘贴最多 65536 字符。若要重试失败项，点击“清除已结束项”后重新加入链接；这个按钮不移除当前项或等待项，也不删除音频。
+
+“取消全部”停止当前下载并取消等待项，清理工具创建的临时 Cookie；已完成音频保留。关闭时若有当前或等待任务，会先询问是否取消退出；选择否保留队列。队列仅在当前窗口内存中保存，退出后不自动恢复或继续下载。仍只支持歌曲或带单首 i 参数的专辑链接，不展开专辑或播放列表。
+
+## 离线队列维护测试
+
+在已具备 .NET Framework 4.8 编译器的 PowerShell 中运行（源码根目录）：
+
+```powershell
+$csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$refs = @('/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Security.dll','/r:System.Web.dll','/r:System.Web.Extensions.dll')
+& $csc /nologo /target:exe /codepage:65001 /main:QueueTests /out:tests/QueueTests.exe $refs AppleMusicTool.cs tests/QueueTests.cs
+& .\tests\QueueTests.exe
+& $csc /nologo /target:exe /codepage:65001 /win32manifest:app.manifest /out:tests/QueueUiTests.exe $refs tests/QueueUiTests.cs
+Copy-Item App.config tests/QueueUiTests.exe.config
+$state = Join-Path $env:TEMP ('AppleMusicQueueTests-' + [guid]::NewGuid().ToString('N'))
+& .\tests\QueueUiTests.exe .\AppleMusicAAC.exe $state .\.runtime\Scripts\python.exe .\tests\queue_ui_mock.py
+Get-Content (Join-Path $state 'queue-ui-results.json')
+```
+
+模型测试覆盖串行、失败继续、重复、取消及数量边界。界面测试只使用独立临时目录、虚构登录值和假任务，不导入 Apple 网络库，不产生真实下载；测试窗口的关闭确认也仅操作测试进程自己拥有的对话框。不得把 `$state` 改成应用目录或包含个人文件的目录；测试拒绝已有非空目录。假任务的“完成”仅用于验证界面调度，不代表音频验证测试，可与现有 Python 音频完整性测试配合运行。
