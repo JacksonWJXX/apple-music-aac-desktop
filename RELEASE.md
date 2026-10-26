@@ -9,3 +9,5 @@
 7. GitHub's automatic source archives are sufficient. Any manually generated source archive must use the same allowlist. This project does not ship an integrated runtime or dependency/device binaries.
 
 The setup/build workflow is documented in README. A new computer must install its own Python/FFmpeg/dependencies and provide fresh local login. Existing credentials are deliberately not portable or included.
+
+The allowlist includes the reviewed opaque-redacted PNG only. Never replace it with an original browser screenshot. Transfer progress adapters and DPI configuration are source files; do not add test renders, executable configuration copies, runtime or user data.

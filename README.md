@@ -16,7 +16,7 @@
 
 ## 环境与首次安装
 
-目前锁文件面向 **Windows x64、Python 3.13**，其他架构/版本没有验证。
+目前锁文件面向 **Windows x64、Python 3.13、.NET Framework 4.8 或更高版本**，其他架构/版本没有验证。
 
 1. 从 Python 官方来源安装 64 位 Python 3.13，保留 pip。
 2. 安装 FFmpeg，并确认 `ffmpeg` 和 `ffprobe` 在 PATH。可使用 Windows 官方 WinGet 索引中的 `Gyan.FFmpeg` 包；本项目不再分发 FFmpeg。
@@ -85,3 +85,13 @@ python tools/audit_release.py
 ## English overview
 
 A source-only Windows desktop frontend for one-song AAC downloads using the pinned upstream engine. It includes explicit manual login guidance, masked token paste, optional Windows CurrentUser DPAPI storage, bounded user-triggered cookie-file matching, configurable output, safe naming/collision handling, cancellation and audio verification. No browser credential extraction, telemetry, third-party download broker, media or credential data is included. Fresh local authentication is required on each new computer. Read the third-party and security notices before installing dependencies.
+
+## 屏幕缩放、进度与图示
+
+窗口按当前屏幕工作区限制初始大小，内容区可滚动，底部下载、取消和进度区独立固定。启用 .NET Framework 4.8 的 PerMonitorV2；跨屏 DPI 改变后重新限制窗口范围，不修改 Windows 全局缩放。已进行 1366×768、1920×1080 下 100%、125%、150%、200% 的控件缩放与布局模拟；这不代表已完成真实多显示器、不同物理 DPI 的人工验证。
+
+读取元数据、总长度未知时显示阶段与活动进度。传输阶段使用下载器实际字节或分片计数显示百分比；估算大小会标注“约”。传输结束仍需处理与音频验证，只有验证通过才显示完成和 100%。不按经过的时间伪造百分比。
+
+登录指引内附下图，可点击放大。全部 Cookie 值已不可逆遮盖；按图找到自己浏览器中的位置，再私下复制自己的 `media-user-token` 值。
+
+![已遮盖所有 Cookie 值的操作位置图](assets/cookie-guide-redacted.png)

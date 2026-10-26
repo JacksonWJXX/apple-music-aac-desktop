@@ -13,9 +13,82 @@ sys.path.insert(0, str(ROOT))
 import backend
 from tool_core import ToolError, parse_song_url, safe_filename, publish_audio
 import network_guard
+from transfer_progress import TransferProgress, downloader_progress
 
 
 class ToolTests(unittest.TestCase):
+    def test_transfer_rounding_never_reaches_completion(self):
+        events=[]
+        reporter=TransferProgress(lambda phase,**fields:events.append({'phase':phase,**fields}),interval=0)
+        for done in (99949,99950,99999):
+            reporter.hook({'status':'downloading','downloaded_bytes':done,'total_bytes':100000})
+            self.assertEqual(events[-1]['phase'],'downloading')
+            self.assertLessEqual(events[-1]['percent'],99.9)
+        reporter.hook({'status':'downloading','downloaded_bytes':100000,'total_bytes':100000})
+        self.assertEqual(events[-1]['phase'],'processing')
+        self.assertNotIn('percent',events[-1])
+
+    def test_pinned_selector_and_direct_import_receive_hooks_and_restore(self):
+        # Instantiate the installed yt-dlp classes, but never call download or
+        # any network method. Its real dispatcher chooses HTTP/HLS classes.
+        from yt_dlp import YoutubeDL
+        import yt_dlp.downloader as selector
+        from yt_dlp.downloader import http,hls
+        original=(http.HttpFD,hls.HlsFD,selector.HttpFD,selector.HlsFD)
+        protocols=dict(selector.PROTOCOL_MAP)
+        events=[]
+        reporter=TransferProgress(lambda phase,**fields:events.append({'phase':phase,**fields}),interval=0)
+        with YoutubeDL({'quiet':True,'noprogress':True,'skip_download':True}) as ydl:
+            with downloader_progress(reporter):
+                for protocol,url,base in (
+                    ('https','https://example.invalid/synthetic.m4a',original[0]),
+                    ('m3u8_native','https://example.invalid/synthetic.m3u8',original[1])):
+                    chosen=selector.get_suitable_downloader({'url':url,'protocol':protocol},
+                        {'hls_prefer_native':True},protocol=protocol)
+                    self.assertIsNot(chosen,base)
+                    self.assertTrue(issubclass(chosen,base))
+                    instance=chosen(ydl,ydl.params)
+                    before=len(events)
+                    instance._hook_progress({'status':'downloading','downloaded_bytes':25,'total_bytes':100},{})
+                    self.assertEqual(len(events),before+1)
+                    self.assertEqual(events[-1]['percent'],25)
+                # Match the upstream AAC engine's late submodule imports too.
+                from yt_dlp.downloader.http import HttpFD
+                from yt_dlp.downloader.hls import HlsFD
+                self.assertIs(HttpFD,selector.HttpFD)
+                self.assertIs(HlsFD,selector.HlsFD)
+        self.assertEqual((http.HttpFD,hls.HlsFD,selector.HttpFD,selector.HlsFD),original)
+        self.assertEqual(selector.PROTOCOL_MAP,protocols)
+        with self.assertRaisesRegex(RuntimeError,'synthetic_stop'):
+            with downloader_progress(reporter):
+                raise RuntimeError('synthetic_stop')
+        self.assertEqual((http.HttpFD,hls.HlsFD,selector.HttpFD,selector.HlsFD),original)
+        self.assertEqual(selector.PROTOCOL_MAP,protocols)
+
+    def test_real_counter_progress_unknown_and_verification_boundary(self):
+        events=[]
+        p=TransferProgress(lambda phase,**fields:events.append({'phase':phase,**fields}),interval=0)
+        p.hook({'status':'downloading','downloaded_bytes':25,'total_bytes':100,
+                'url':'SYNTHETIC_PRIVATE_URL','info_dict':{'token':'SYNTHETIC_PRIVATE_VALUE'}})
+        self.assertEqual(events[-1]['percent'],25)
+        self.assertNotIn('SYNTHETIC_PRIVATE',json.dumps(events))
+        p.hook({'status':'downloading','downloaded_bytes':55})
+        self.assertNotIn('percent',events[-1]);self.assertEqual(events[-1]['bytes_done'],55)
+        p.hook({'status':'downloading','downloaded_bytes':100,'total_bytes':100})
+        self.assertEqual(events[-1]['phase'],'processing');self.assertNotIn('percent',events[-1])
+        p.hook({'status':'finished','downloaded_bytes':100,'total_bytes':100})
+        self.assertEqual(events[-1],{'phase':'processing'})
+
+    def test_fragment_progress_and_estimates_are_explicit(self):
+        events=[];p=TransferProgress(lambda phase,**fields:events.append({'phase':phase,**fields}),interval=0)
+        p.hook({'status':'downloading','fragment_index':2,'fragment_count':8,'downloaded_bytes':40},'hls')
+        self.assertEqual(events[-1]['percent'],25);self.assertEqual(events[-1]['fragments_total'],8)
+        count=len(events);p.hook({'status':'downloading','downloaded_bytes':90,'total_bytes':100},'http')
+        self.assertEqual(len(events),count)
+        q=TransferProgress(lambda phase,**fields:events.append({'phase':phase,**fields}),interval=0)
+        q.hook({'status':'downloading','downloaded_bytes':10,'total_bytes_estimate':100})
+        self.assertTrue(events[-1]['estimated']);self.assertEqual(events[-1]['percent'],10)
+
     def test_single_song_normalization_and_album_track(self):
         self.assertEqual(parse_song_url('https://music.apple.com/us/song/title/1234567890')[0], '1234567890')
         self.assertEqual(parse_song_url('https://music.apple.com/cn/album/test/12?i=34&ls=1'), ('34', 'https://music.apple.com/cn/song/34'))

@@ -8,6 +8,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import winreg
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,6 +30,10 @@ def main():
     compiler = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     if not compiler.is_file():
         raise SystemExit('Windows .NET Framework C# compiler not found. No security settings will be changed.')
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full') as key:
+        release = winreg.QueryValueEx(key, 'Release')[0]
+    if release < 528040:
+        raise SystemExit('.NET Framework 4.8 or newer is required for this DPI-aware build. No system update was attempted.')
     ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
     if not ffmpeg or not ffprobe:
         raise SystemExit('Install FFmpeg/ffprobe yourself from a trusted source and put both on PATH first.')
@@ -43,10 +48,11 @@ def main():
              '--require-hashes', '--only-binary=:all:', '--no-binary=construct', '--no-build-isolation',
              '-r', ROOT / 'requirements.lock'])
         run([python, '-I', '-m', 'pip', 'check'])
-    run([compiler, '/nologo', '/target:winexe', '/codepage:65001', '/out:AppleMusicAAC.exe',
+    run([compiler, '/nologo', '/target:winexe', '/codepage:65001', '/out:AppleMusicAAC.exe', '/win32manifest:app.manifest',
          '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll',
          '/reference:System.Security.dll', '/reference:System.Web.dll',
          '/reference:System.Web.Extensions.dll', 'AppleMusicTool.cs'])
+    shutil.copyfile(ROOT / 'App.config', ROOT / 'AppleMusicAAC.exe.config')
     (ROOT / 'tool-config.json').write_text(json.dumps({'python': '.runtime/Scripts/python.exe',
                                                       'ffmpeg': ffmpeg, 'ffprobe': ffprobe}, indent=2), encoding='utf-8')
     if options.shortcut:

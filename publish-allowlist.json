@@ -1,5 +1,6 @@
 [
   ".gitignore",
+  "App.config",
   "AppleMusicTool.cs",
   "LICENSE",
   "LICENSES/enhanced-Unlicense.txt",
@@ -8,6 +9,8 @@
   "RELEASE.md",
   "SECURITY.md",
   "THIRD_PARTY_NOTICES.md",
+  "app.manifest",
+  "assets/cookie-guide-redacted.png",
   "backend.py",
   "docs/dependency-license-metadata.json",
   "network_guard.py",
@@ -17,5 +20,6 @@
   "tool-config.example.json",
   "tool_core.py",
   "tools/audit_release.py",
-  "tools/setup.py"
+  "tools/setup.py",
+  "transfer_progress.py"
 ]

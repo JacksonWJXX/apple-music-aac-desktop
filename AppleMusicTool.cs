@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -14,6 +14,28 @@ using System.Threading;
 using System.Web;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+
+[assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8",FrameworkDisplayName=".NET Framework 4.8")]
+
+internal static class WindowLayout {
+    public static Size FitSize(Rectangle work,Size preferred,float scale) {
+        int marginX=(int)Math.Round(32*scale),marginY=(int)Math.Round(48*scale);
+        return new Size(Math.Min((int)Math.Round(preferred.Width*scale),Math.Max(180,work.Width-marginX)),Math.Min((int)Math.Round(preferred.Height*scale),Math.Max(180,work.Height-marginY)));
+    }
+    public static Size FitSize(Rectangle work,Size preferred) {return FitSize(work,preferred,1F);}
+    public static void Fit(Form form,Size preferred) {
+        Rectangle work=Screen.FromControl(form).WorkingArea;float scale=form.DeviceDpi/96F;Size size=FitSize(work,preferred,scale);
+        form.MinimumSize=new Size(Math.Min((int)Math.Round(400*scale),size.Width),Math.Min((int)Math.Round(280*scale),size.Height));form.Size=size;
+        form.Location=new Point(work.Left+(work.Width-size.Width)/2,work.Top+(work.Height-size.Height)/2);
+    }
+    public static void Clamp(Form form) {
+        if(form.IsDisposed||form.Disposing)return;
+        Rectangle work=Screen.FromControl(form).WorkingArea;float scale=form.DeviceDpi/96F;Size cap=FitSize(work,new Size(10000,10000),scale);
+        form.MinimumSize=new Size(Math.Min((int)Math.Round(400*scale),cap.Width),Math.Min((int)Math.Round(280*scale),cap.Height));
+        Size size=new Size(Math.Min(form.Width,cap.Width),Math.Min(form.Height,cap.Height));form.Size=size;
+        form.Location=new Point(Math.Max(work.Left,Math.Min(form.Left,work.Right-size.Width)),Math.Max(work.Top,Math.Min(form.Top,work.Bottom-size.Height)));
+    }
+}
 
 internal sealed class BusyGate {
     private int busy;
@@ -167,16 +189,31 @@ internal static class CookieScan {
 internal sealed class LoginGuide : Form {
     private TextBox value; private Button save; private bool saved; private readonly Action<string> saver;
     public LoginGuide(Action<string> saveAction) {
-        saver=saveAction; Text="登录指引 · 只粘贴你自己的 Cookie 值"; ClientSize=new Size(730,475); Font=new Font("Microsoft YaHei UI",9.5F); BackColor=Color.FromArgb(250,249,245); FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false; MinimizeBox=false; StartPosition=FormStartPosition.CenterParent;
-        Label title=new Label();title.Text="自己登录，复制一次，然后加密保存";title.Font=new Font(Font.FontFamily,16,FontStyle.Bold);title.SetBounds(24,22,680,38);Controls.Add(title);
-        Label steps=new Label();steps.Text="1  点击下方按钮，在浏览器中自行登录 Apple Music。\n\n2  按 Ctrl + Shift + I，打开 Application（应用）标签。\n\n3  展开 Storage → Cookies，选择 https://music.apple.com。\n\n4  找到 media-user-token，只复制它的 Value（值）。\n    不要复制整行、其他 Cookie 或在控制台粘贴代码。";steps.SetBounds(26,73,680,210);Controls.Add(steps);
-        Button open=new Button();open.Text="打开 Apple Music";open.SetBounds(26,287,180,32);open.FlatStyle=FlatStyle.Flat;open.Click+=delegate{try{Process.Start(new ProcessStartInfo("https://music.apple.com"){UseShellExecute=true});}catch{MessageBox.Show(this,"请在浏览器自行打开 https://music.apple.com。");}};Controls.Add(open);
-        Label prompt=new Label();prompt.Text="仅粘贴 media-user-token 的值（输入内容会隐藏）";prompt.SetBounds(26,335,675,24);Controls.Add(prompt);
-        value=new TextBox();value.UseSystemPasswordChar=true;value.MaxLength=32768;value.SetBounds(26,363,570,30);Controls.Add(value);
-        Button paste=new Button();paste.Text="粘贴";paste.SetBounds(608,361,96,32);paste.Click+=delegate{value.Paste();};Controls.Add(paste);
-        save=new Button();save.Text="保存登录";save.SetBounds(488,419,110,34);save.Click+=SaveValue;Controls.Add(save);
-        Button back=new Button();back.Text="返回";back.SetBounds(608,419,96,34);back.Click+=delegate{Close();};Controls.Add(back);
-        Label privacy=new Label();privacy.Text="只在本机使用。保存后请自行用普通文字覆盖剪贴板。";privacy.SetBounds(26,421,450,40);privacy.ForeColor=Color.FromArgb(95,99,85);Controls.Add(privacy);
+        saver=saveAction;Text="登录指引 · 只粘贴自己的 Cookie 值";Font=new Font("Microsoft YaHei UI",9.5F);AutoScaleDimensions=new SizeF(96F,96F);AutoScaleMode=AutoScaleMode.Dpi;
+        BackColor=Color.FromArgb(250,249,245);FormBorderStyle=FormBorderStyle.Sizable;MaximizeBox=false;MinimizeBox=false;StartPosition=FormStartPosition.CenterParent;Size=WindowLayout.FitSize(Screen.PrimaryScreen.WorkingArea,new Size(720,600));
+        TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Absolute,160));Controls.Add(shell);
+        Panel scroll=new Panel();scroll.Dock=DockStyle.Fill;scroll.AutoScroll=true;scroll.Margin=Padding.Empty;shell.Controls.Add(scroll,0,0);
+        TableLayoutPanel body=new TableLayoutPanel();body.ColumnCount=1;body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));body.AutoSize=true;body.AutoSizeMode=AutoSizeMode.GrowAndShrink;body.Dock=DockStyle.Top;body.Padding=new Padding(16);scroll.Controls.Add(body);
+        Action<Control> add=delegate(Control control){int row=body.RowCount++;body.RowStyles.Add(new RowStyle(SizeType.AutoSize));control.Dock=DockStyle.Top;control.Margin=new Padding(0,4,0,8);body.Controls.Add(control,0,row);};
+        Label heading=new Label();heading.AutoSize=true;heading.Text="自己登录 → 找到这一项 → 只粘贴值";heading.Font=new Font(Font.FontFamily,15,FontStyle.Bold);add(heading);
+        Button open=new Button();open.Text="1  打开 Apple Music 并自行登录";open.Height=34;open.FlatStyle=FlatStyle.Flat;open.Click+=delegate{try{Process.Start(new ProcessStartInfo("https://music.apple.com"){UseShellExecute=true});}catch{MessageBox.Show(this,"请在浏览器自行打开 https://music.apple.com。");}};add(open);
+        Label steps=new Label();steps.AutoSize=true;steps.Text="2  按 Ctrl + Shift + I，选择 Application（应用）。\n3  左侧展开 Cookies，选择 https://music.apple.com。\n4  点击 media-user-token，在自己的浏览器中复制完整 Value。\n\n下图只展示位置：敏感值已遮挡，不要从图中复制，也不要复制整行或在控制台执行代码。";add(steps);
+        string imagePath=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"assets","cookie-guide-redacted.png");
+        if(File.Exists(imagePath)) {
+            PictureBox image=new PictureBox();image.Height=220;image.SizeMode=PictureBoxSizeMode.Zoom;image.Image=Image.FromFile(imagePath);image.Cursor=Cursors.Hand;image.AccessibleName="脱敏图示：Application、Cookies、music.apple.com、media-user-token；点击放大";
+            image.Click+=delegate{using(Form viewer=new Form()){viewer.Text="登录位置图示（敏感值已遮挡）";viewer.AutoScaleDimensions=new SizeF(96,96);viewer.AutoScaleMode=AutoScaleMode.Dpi;viewer.AutoScroll=true;PictureBox full=new PictureBox();full.SizeMode=PictureBoxSizeMode.AutoSize;full.Image=(Image)image.Image.Clone();viewer.Controls.Add(full);viewer.Shown+=delegate{WindowLayout.Fit(viewer,new Size(1000,760));};viewer.DpiChanged+=delegate{WindowLayout.Clamp(viewer);};viewer.ShowDialog(this);full.Image.Dispose();}};add(image);FormClosed+=delegate{image.Image.Dispose();};
+            Label caption=new Label();caption.AutoSize=true;caption.Text="点击图示可放大。值必须从你自己的已登录浏览器复制。";add(caption);
+        } else {Label placeholder=new Label();placeholder.AutoSize=false;placeholder.Height=100;placeholder.Text="位置图示尚未安装；可按上面的 2—4 步操作。";placeholder.BackColor=Color.FromArgb(240,238,230);placeholder.TextAlign=ContentAlignment.MiddleCenter;add(placeholder);}
+        TableLayoutPanel bottom=new TableLayoutPanel();bottom.Dock=DockStyle.Fill;bottom.Padding=new Padding(16,4,16,10);bottom.ColumnCount=2;bottom.RowCount=4;bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,84));bottom.RowStyles.Add(new RowStyle(SizeType.Absolute,24));bottom.RowStyles.Add(new RowStyle(SizeType.Absolute,32));bottom.RowStyles.Add(new RowStyle(SizeType.Absolute,36));bottom.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.Controls.Add(bottom,0,1);
+        Label prompt=new Label();prompt.Text="仅粘贴 media-user-token 的值（内容会隐藏）";prompt.Dock=DockStyle.Fill;bottom.Controls.Add(prompt,0,0);bottom.SetColumnSpan(prompt,2);
+        value=new TextBox();value.UseSystemPasswordChar=true;value.MaxLength=32768;value.Dock=DockStyle.Fill;bottom.Controls.Add(value,0,1);
+        Button paste=new Button();paste.Text="粘贴";paste.Dock=DockStyle.Fill;paste.Click+=delegate{value.Paste();};bottom.Controls.Add(paste,1,1);
+        Label privacy=new Label();privacy.Text="保存后请自行用普通文字覆盖剪贴板；不要把值发到聊天。";privacy.Dock=DockStyle.Fill;privacy.AutoEllipsis=true;privacy.ForeColor=Color.FromArgb(95,99,85);bottom.Controls.Add(privacy,0,2);bottom.SetColumnSpan(privacy,2);
+        FlowLayoutPanel actions=new FlowLayoutPanel();actions.Dock=DockStyle.Fill;actions.FlowDirection=FlowDirection.RightToLeft;bottom.Controls.Add(actions,0,3);bottom.SetColumnSpan(actions,2);
+        Button back=new Button();back.Text="返回";back.Size=new Size(84,30);back.Click+=delegate{Close();};actions.Controls.Add(back);
+        save=new Button();save.Text="保存登录";save.Size=new Size(104,30);save.Click+=SaveValue;actions.Controls.Add(save);
+        scroll.ClientSizeChanged+=delegate{body.Width=scroll.ClientSize.Width;foreach(Control c in body.Controls)if(c is Label)c.MaximumSize=new Size(Math.Max(180,body.ClientSize.Width-body.Padding.Horizontal-8),0);};
+        Shown+=delegate{WindowLayout.Fit(this,new Size(720,600));body.Width=scroll.ClientSize.Width;};DpiChanged+=delegate{if(IsHandleCreated&&!IsDisposed)BeginInvoke((MethodInvoker)delegate{WindowLayout.Clamp(this);body.Width=scroll.ClientSize.Width;});};
         FormClosed+=delegate{value.Clear();};
     }
     private void SaveValue(object sender,EventArgs args) { if(saved)return;save.Enabled=false;try{string token=InputRules.TokenValue(value.Text);saver(token);saved=true;DialogResult=DialogResult.OK;Close();}catch{MessageBox.Show(this,"未保存：请只粘贴有效的 media-user-token 值，并检查工具目录权限。不会显示输入内容。","登录",MessageBoxButtons.OK,MessageBoxIcon.Information);}finally{value.Clear();if(!saved)save.Enabled=true;} }
@@ -202,7 +239,9 @@ internal sealed class MainWindow : Form {
     private readonly CredentialVault vault;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly BusyGate gate = new BusyGate();
-    private TextBox link; private Label login, status, detail;
+    private TextBox link; private Label login, status, detail, progressPercent;
+    private Panel bodySurface; private TableLayoutPanel footerSurface;
+    private string currentTitle;
     private Button download, cancel, import, clear, guide, scan, changeFolder; private Label destinationLabel; private CheckBox remember;
     private ProgressBar progress; private System.Windows.Forms.Timer timer;
     private Process process; private KillJob killJob; private string jobFolder, sessionToken;
@@ -210,43 +249,53 @@ internal sealed class MainWindow : Form {
     private string previousPhase = "";
 
     public MainWindow(string folder) {
-        root = folder; jobsRoot = Path.Combine(root, "private", "jobs"); vault = new CredentialVault(Path.Combine(root, "private")); settings=ToolSettings.Load(root);output=settings.OutputFolder;
-        Text = "Apple Music AAC 下载器"; ClientSize = new Size(820, 662); MinimumSize = new Size(836, 701);
-        FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Microsoft YaHei UI", 9.5F); BackColor = Color.FromArgb(250,249,245); ForeColor=Color.FromArgb(48,53,43);
-        Label heading = LabelAt("让音乐，落在你的文件夹里", 28, 25, 760, 40); heading.Font = new Font(Font.FontFamily, 21, FontStyle.Bold);
-        LabelAt("Apple Music 单曲  /  AAC 音频  /  自动按曲名命名", 30, 73, 755, 24).ForeColor=Color.FromArgb(103,108,95);
-        Panel card1=new Panel();card1.BackColor=Color.FromArgb(240,238,230);card1.SetBounds(24,114,772,180);Controls.Add(card1);card1.SendToBack();
-        Panel card2=new Panel();card2.BackColor=Color.FromArgb(240,238,230);card2.SetBounds(24,310,772,208);Controls.Add(card2);card2.SendToBack();
-        LabelAt("01  单曲链接", 44, 133, 730, 25).Font=new Font(Font.FontFamily,10,FontStyle.Bold);
-        link = new TextBox(); link.AccessibleName="Apple Music 单曲链接";link.SetBounds(44, 169, 732, 34); link.Font = new Font(Font.FontFamily, 11); Controls.Add(link);
-        destinationLabel=LabelAt("保存至  "+output, 44, 229, 506, 38);
-        changeFolder=ButtonAt("更改…",562,228,84,34);changeFolder.Click+=ChangeDestination;
-        Button open = ButtonAt("打开文件夹", 658, 228, 118, 34); open.Click += delegate { try { Directory.CreateDirectory(output); Process.Start("explorer.exe", Quote(output)); } catch { SetStatus("无法打开文件夹，请检查目录权限。", true); } };
-        LabelAt("02  登录与隐私",44,328,730,25).Font=new Font(Font.FontFamily,10,FontStyle.Bold);
-        guide=ButtonAt("登录指引",44,367,125,36);guide.Click+=delegate{using(LoginGuide dialog=new LoginGuide(StoreToken)){dialog.ShowDialog(this);}};
-        import = ButtonAt("导入文件…", 181, 367, 123, 36); import.Click += ImportLogin;
-        scan=ButtonAt("扫描匹配…",316,367,125,36);scan.Click+=ScanLogin;
-        clear = ButtonAt("清除登录", 453, 367, 110, 36); clear.Click += ClearLogin;
-        remember = new CheckBox(); remember.Text = "下次保存时加密记住登录（取消勾选不会删除已有登录）";remember.BackColor=Color.FromArgb(240,238,230); remember.Checked = true; remember.SetBounds(44, 414, 727, 28); Controls.Add(remember);
-        login = LabelAt(vault.Exists ? "已保存加密登录；仅在你点击下载时使用。" : "首次使用，点击“登录指引”后粘贴你自己的 Cookie 值即可。", 44, 449, 730, 25);
-        LabelAt("不读取浏览器凭据；临时明文副本在任务结束或取消后删除。", 44, 481, 730, 24).ForeColor = Color.FromArgb(103,108,95);
-        download = ButtonAt("下载单曲", 24, 540, 170, 46); download.BackColor = Color.FromArgb(91,108,76); download.ForeColor = Color.White; download.FlatStyle = FlatStyle.Flat; download.Click += StartDownload;
-        cancel = ButtonAt("取消", 206, 540, 110, 46); cancel.Enabled = false; cancel.Click += delegate { CancelJob(); };
-        status = LabelAt("准备就绪", 338, 551, 458, 34);
-        progress = new ProgressBar(); progress.SetBounds(24, 608, 772, 7); progress.Style = ProgressBarStyle.Continuous; Controls.Add(progress);
-        detail = LabelAt("只接受单曲，重名会自动避让，已有文件不会覆盖。", 24, 630, 772, 25); detail.ForeColor = Color.FromArgb(103,108,95);
-        card1.SendToBack();
-        card2.SendToBack();
-        timer = new System.Windows.Forms.Timer(); timer.Interval = 250; timer.Tick += PollJob;
-        FormClosing += ClosingWindow;
-        Shown += delegate { CleanupStaleJobs(); };
+        root=folder;jobsRoot=Path.Combine(root,"private","jobs");vault=new CredentialVault(Path.Combine(root,"private"));settings=ToolSettings.Load(root);output=settings.OutputFolder;
+        Text="Apple Music AAC 下载器";Font=new Font("Microsoft YaHei UI",9.5F);AutoScaleDimensions=new SizeF(96F,96F);AutoScaleMode=AutoScaleMode.Dpi;
+        BackColor=Color.FromArgb(250,249,245);ForeColor=Color.FromArgb(48,53,43);FormBorderStyle=FormBorderStyle.Sizable;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
+        Size=WindowLayout.FitSize(Screen.PrimaryScreen.WorkingArea,new Size(720,560));
+        TableLayoutPanel shell=new TableLayoutPanel();shell.Dock=DockStyle.Fill;shell.ColumnCount=1;shell.RowCount=2;shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.RowStyles.Add(new RowStyle(SizeType.Absolute,120));Controls.Add(shell);
+        bodySurface=new Panel();bodySurface.Dock=DockStyle.Fill;bodySurface.AutoScroll=true;bodySurface.Margin=Padding.Empty;shell.Controls.Add(bodySurface,0,0);
+        TableLayoutPanel content=Stack(BackColor);content.Padding=new Padding(18,14,18,8);bodySurface.Controls.Add(content);
+        Label heading=BodyLabel("Apple Music 单曲下载",true);heading.Font=new Font(Font.FontFamily,18,FontStyle.Bold);Row(content,heading);
+        Row(content,BodyLabel("AAC 音频 · 按歌曲名保存 · 已有文件不覆盖",false));
+        TableLayoutPanel card1=Card();Row(content,card1);Row(card1,BodyLabel("01  单曲链接",true));
+        link=new TextBox();link.AccessibleName="Apple Music 单曲链接";link.Dock=DockStyle.Top;link.Font=new Font(Font.FontFamily,10.5F);link.Margin=new Padding(0,5,0,10);Row(card1,link);
+        destinationLabel=BodyLabel("保存至  "+output,false);Row(card1,destinationLabel);
+        FlowLayoutPanel folders=ButtonFlow();changeFolder=FlowButton("更改保存位置…",124);changeFolder.Click+=ChangeDestination;folders.Controls.Add(changeFolder);
+        Button open=FlowButton("打开文件夹",112);open.Click+=delegate{try{Directory.CreateDirectory(output);Process.Start("explorer.exe",Quote(output));}catch{SetStatus("无法打开文件夹，请检查目录权限。",true);}};folders.Controls.Add(open);Row(card1,folders);
+        TableLayoutPanel card2=Card();Row(content,card2);Row(card2,BodyLabel("02  登录与隐私",true));
+        FlowLayoutPanel loginButtons=ButtonFlow();guide=FlowButton("登录指引",104);guide.Click+=delegate{using(LoginGuide dialog=new LoginGuide(StoreToken)){dialog.ShowDialog(this);}};loginButtons.Controls.Add(guide);
+        import=FlowButton("导入文件…",108);import.Click+=ImportLogin;loginButtons.Controls.Add(import);
+        scan=FlowButton("扫描匹配…",108);scan.Click+=ScanLogin;loginButtons.Controls.Add(scan);
+        clear=FlowButton("清除登录",96);clear.Click+=ClearLogin;loginButtons.Controls.Add(clear);Row(card2,loginButtons);
+        remember=new CheckBox();remember.AutoSize=true;remember.Dock=DockStyle.Top;remember.Text="下次保存时加密记住登录";remember.Checked=true;remember.Margin=new Padding(0,6,0,4);Row(card2,remember);
+        Row(card2,BodyLabel("取消勾选不会删除已有登录；需移除请点“清除登录”。",false));
+        login=BodyLabel(vault.Exists?"已保存加密登录；仅在点击下载时使用。":"首次使用请打开“登录指引”，粘贴你自己的 Cookie 值。",false);Row(card2,login);
+        Label privacy=BodyLabel("不读取浏览器凭据；任务结束或取消后删除临时副本。",false);privacy.ForeColor=Color.FromArgb(103,108,95);Row(card2,privacy);
+        footerSurface=new TableLayoutPanel();footerSurface.Dock=DockStyle.Fill;footerSurface.Padding=new Padding(18,6,18,8);footerSurface.Margin=Padding.Empty;footerSurface.ColumnCount=1;footerSurface.RowCount=3;footerSurface.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.RowStyles.Add(new RowStyle(SizeType.Absolute,42));footerSurface.RowStyles.Add(new RowStyle(SizeType.Absolute,24));footerSurface.RowStyles.Add(new RowStyle(SizeType.Percent,100));shell.Controls.Add(footerSurface,0,1);
+        TableLayoutPanel actions=new TableLayoutPanel();actions.Dock=DockStyle.Fill;actions.ColumnCount=3;actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,132));actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,88));actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));footerSurface.Controls.Add(actions,0,0);
+        download=FlowButton("下载单曲",124);download.Dock=DockStyle.Fill;download.BackColor=Color.FromArgb(91,108,76);download.ForeColor=Color.White;download.Click+=StartDownload;actions.Controls.Add(download,0,0);
+        cancel=FlowButton("取消",80);cancel.Dock=DockStyle.Fill;cancel.Enabled=false;cancel.Click+=delegate{CancelJob();};actions.Controls.Add(cancel,1,0);
+        status=new Label();status.Text="准备就绪";status.AutoEllipsis=true;status.Dock=DockStyle.Fill;status.TextAlign=ContentAlignment.MiddleLeft;status.Margin=new Padding(8,0,0,0);actions.Controls.Add(status,2,0);
+        TableLayoutPanel meter=new TableLayoutPanel();meter.Dock=DockStyle.Fill;meter.ColumnCount=2;meter.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));meter.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,76));footerSurface.Controls.Add(meter,0,1);
+        progress=new ProgressBar();progress.Dock=DockStyle.Fill;progress.Margin=new Padding(0,7,8,7);progress.Style=ProgressBarStyle.Continuous;meter.Controls.Add(progress,0,0);
+        progressPercent=new Label();progressPercent.Text="—";progressPercent.Dock=DockStyle.Fill;progressPercent.TextAlign=ContentAlignment.MiddleRight;meter.Controls.Add(progressPercent,1,0);
+        detail=new Label();detail.Text="只接受单曲；读取信息时不显示虚假百分比。";detail.Dock=DockStyle.Fill;detail.AutoEllipsis=true;detail.TextAlign=ContentAlignment.MiddleLeft;detail.ForeColor=Color.FromArgb(103,108,95);footerSurface.Controls.Add(detail,0,2);
+        bodySurface.ClientSizeChanged+=delegate{content.Width=Math.Max(200,bodySurface.ClientSize.Width);WrapLabels(content);};
+        timer=new System.Windows.Forms.Timer();timer.Interval=250;timer.Tick+=PollJob;FormClosing+=ClosingWindow;
+        Shown+=delegate{WindowLayout.Fit(this,new Size(720,560));content.Width=bodySurface.ClientSize.Width;WrapLabels(content);CleanupStaleJobs();};
+        DpiChanged+=delegate{if(!IsDisposed&&IsHandleCreated)BeginInvoke((MethodInvoker)delegate{WindowLayout.Clamp(this);content.Width=bodySurface.ClientSize.Width;WrapLabels(content);});};
     }
-    private Label LabelAt(string text, int x, int y, int w, int h) { Label label = new Label(); label.Text = text;label.BackColor=((y>=114&&y<294)||(y>=310&&y<518))?Color.FromArgb(240,238,230):BackColor; label.AutoEllipsis = true; label.SetBounds(x,y,w,h); Controls.Add(label); return label; }
-    private Button ButtonAt(string text, int x, int y, int w, int h) { Button button = new Button(); button.Text = text; button.SetBounds(x,y,w,h); button.Cursor = Cursors.Hand;button.FlatStyle=FlatStyle.Flat;button.FlatAppearance.BorderColor=Color.FromArgb(196,198,183);button.BackColor=Color.FromArgb(250,249,245);button.ForeColor=Color.FromArgb(48,53,43);button.AccessibleName=text; Controls.Add(button); return button; }
+    private TableLayoutPanel Stack(Color color) {TableLayoutPanel panel=new TableLayoutPanel();panel.ColumnCount=1;panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));panel.AutoSize=true;panel.AutoSizeMode=AutoSizeMode.GrowAndShrink;panel.Dock=DockStyle.Top;panel.Margin=Padding.Empty;panel.BackColor=color;return panel;}
+    private TableLayoutPanel Card() {TableLayoutPanel card=Stack(Color.FromArgb(240,238,230));card.Padding=new Padding(12);card.Margin=new Padding(0,10,0,0);return card;}
+    private static void Row(TableLayoutPanel panel,Control control) {int row=panel.RowCount++;panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));control.Dock=DockStyle.Top;panel.Controls.Add(control,0,row);}
+    private Label BodyLabel(string text,bool bold) {Label label=new Label();label.Text=text;label.AutoSize=true;label.Dock=DockStyle.Top;label.Margin=new Padding(0,3,0,5);label.BackColor=Color.Transparent;if(bold)label.Font=new Font(Font.FontFamily,10,FontStyle.Bold);return label;}
+    private FlowLayoutPanel ButtonFlow() {FlowLayoutPanel flow=new FlowLayoutPanel();flow.AutoSize=true;flow.WrapContents=true;flow.Dock=DockStyle.Top;flow.Margin=new Padding(0,4,0,4);return flow;}
+    private Button FlowButton(string text,int width) {Button button=new Button();button.Text=text;button.Size=new Size(width,34);button.Margin=new Padding(0,0,8,4);button.FlatStyle=FlatStyle.Flat;button.FlatAppearance.BorderColor=Color.FromArgb(196,198,183);button.BackColor=Color.FromArgb(250,249,245);button.ForeColor=Color.FromArgb(48,53,43);button.Cursor=Cursors.Hand;button.AccessibleName=text;return button;}
+    private static void WrapLabels(Control parent) {foreach(Control control in parent.Controls){if(control is Label || control is CheckBox)control.MaximumSize=new Size(Math.Max(140,parent.ClientSize.Width-parent.Padding.Horizontal-8),0);if(control.HasChildren)WrapLabels(control);}}
     private static string Quote(string value) { if (value.IndexOf('"') >= 0) throw new Exception("path"); return "\"" + value + "\""; }
     private void SetStatus(string text, bool error) { status.Text = text; status.ForeColor = error ? Color.FromArgb(175,35,55) : Color.FromArgb(35,75,65); }
-    private void SetBusy(bool busy) { download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = !busy; cancel.Enabled = busy; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) progress.Value = 0; }
+    private void SetBusy(bool busy) { download.Enabled = !busy; import.Enabled = !busy; clear.Enabled = !busy; guide.Enabled=!busy;scan.Enabled=!busy;changeFolder.Enabled=!busy;remember.Enabled = !busy; link.Enabled = !busy; cancel.Enabled = busy; progress.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous; if (!busy) {progress.Value = 0;progressPercent.Text="—";} }
     private void StoreToken(string token) { if(remember.Checked)vault.Save(token);sessionToken=token;login.Text=remember.Checked?"已使用 Windows 当前用户加密保存，仅向 Apple 认证。":(vault.Exists?"新值仅临时使用；旧加密登录仍保留，可点“清除登录”移除。":"已临时导入，关闭工具后需要重新提供。");SetStatus("登录已保存，可以开始下载。",false); }
     private void ImportPath(string path) { try{StoreToken(InputRules.CookieToken(path));}catch{SetStatus("导入失败：请检查 Apple Music Cookie 格式及目录权限。",true);} }
     private void ChangeDestination(object sender,EventArgs args) { using(FolderBrowserDialog dialog=new FolderBrowserDialog()){dialog.Description="选择音频保存文件夹，已有文件不会被覆盖";dialog.SelectedPath=output;if(dialog.ShowDialog(this)!=DialogResult.OK)return;try{ToolSettings.CheckWritable(dialog.SelectedPath);settings.OutputFolder=Path.GetFullPath(dialog.SelectedPath);settings.Save(root);output=settings.OutputFolder;destinationLabel.Text="保存至  "+output;SetStatus("保存位置已更改。",false);}catch{SetStatus("无法使用该文件夹，请检查访问权限。",true);}} }
@@ -295,7 +344,7 @@ internal sealed class MainWindow : Form {
             process.OutputDataReceived += delegate { }; process.ErrorDataReceived += delegate { };
             process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); killJob.Assign(process);
             File.WriteAllText(Path.Combine(jobFolder,"go.flag"), "start");
-            cancelRequested = false; previousPhase = ""; started = DateTime.UtcNow; SetBusy(true); SetStatus("正在连接 Apple 并读取单曲信息…", false); detail.Text = "临时登录副本仅用于当前任务。"; timer.Start();
+            cancelRequested = false; previousPhase = ""; currentTitle=null; started = DateTime.UtcNow; SetBusy(true); SetStatus("正在连接 Apple 并读取单曲信息…", false); detail.Text = "临时登录副本仅用于当前任务。"; timer.Start();
         } catch (Exception error) {
             StopProcess(); CleanupJob(); gate.Leave(); SetBusy(false);
             SetStatus(error.Message == "invalid_url" ? "链接无效：请使用 music.apple.com 的单曲链接。" : "无法启动任务：请检查登录、目录权限及工具运行环境。", true);
@@ -312,17 +361,32 @@ internal sealed class MainWindow : Form {
                 previousPhase = phase;
                 if (phase == "metadata") SetStatus("正在读取单曲信息…", false);
                 else if (phase == "downloading") SetStatus("正在下载 AAC 音频…", false);
+                else if (phase == "processing") SetStatus("传输完成，正在整理音频…", false);
                 else if (phase == "verifying") SetStatus("正在检查格式、完整时长和解码…", false);
-                if (state.ContainsKey("title")) detail.Text = Convert.ToString(state["title"]);
+                if (state.ContainsKey("title")) currentTitle=Convert.ToString(state["title"]);
             }
         }
+        if(state!=null&&!cancelRequested)UpdateProgress(state);
         if (!process.HasExited) return;
         timer.Stop(); state = ReadState(); bool clean = CleanupJob();
         if (killJob != null) { killJob.Dispose(); killJob = null; } process.Dispose(); process = null; SetBusy(false); gate.Leave();
         if (!clean) { SetStatus("临时文件清理失败，请关闭工具后检查 private\\jobs 文件夹。", true); return; }
         if (cancelRequested) { SetStatus("任务已取消，临时登录副本已删除。", false); detail.Text = "已完成的音频会保留；可在文件夹中查看。"; return; }
-        if (state != null && Convert.ToString(state["phase"]) == "success") { SetStatus("下载完成，AAC 格式和完整解码检查通过。", false); detail.Text = Path.GetFileName(Convert.ToString(state["file"])); progress.Value = 100; }
+        if (state != null && Convert.ToString(state["phase"]) == "success") { SetStatus("下载完成，AAC 格式和完整解码检查通过。", false); detail.Text = Path.GetFileName(Convert.ToString(state["file"])); progress.Value = 100;progressPercent.Text="100%"; }
         else { string category = state != null && state.ContainsKey("category") ? Convert.ToString(state["category"]) : "local_error"; SetStatus(ErrorText(category), true); detail.Text = "不会显示原始账户、媒体地址或解密日志。"; }
+    }
+    private static string BytesText(double value) {return value>=1048576?(value/1048576).ToString("0.0")+" MiB":value>=1024?(value/1024).ToString("0.0")+" KiB":value.ToString("0")+" B";}
+    private void UpdateProgress(Dictionary<string,object> state) {
+        string phase=Convert.ToString(state["phase"]);
+        if(phase=="downloading"&&state.ContainsKey("percent")) {
+            double percent=Convert.ToDouble(state["percent"]);progress.Style=ProgressBarStyle.Continuous;progress.Value=Math.Max(0,Math.Min(99,(int)percent));progressPercent.Text=(state.ContainsKey("estimated")?"约 ":"")+percent.ToString("0.0")+"%";
+        } else {progress.Style=ProgressBarStyle.Marquee;progressPercent.Text=phase=="verifying"?"校验中":phase=="processing"?"整理中":"—";}
+        if(state.ContainsKey("bytes_done")) {
+            string counters="已传输 "+BytesText(Convert.ToDouble(state["bytes_done"]));
+            if(state.ContainsKey("bytes_total"))counters+=" / "+(state.ContainsKey("estimated")?"预计 ":"")+BytesText(Convert.ToDouble(state["bytes_total"]));else counters+="（总大小未知）";
+            if(state.ContainsKey("fragments_total"))counters+=" · 分片 "+state["fragments_done"]+" / "+state["fragments_total"];
+            detail.Text=counters;
+        } else detail.Text=currentTitle??(phase=="metadata"?"正在读取曲目信息；尚未开始传输音频。":phase=="processing"?"音频已传输，正在整理；尚未完成验证。":"正在进行音频完整性检查。");
     }
     private Dictionary<string,object> ReadState() { try { string file = Path.Combine(jobFolder,"status.json"); return File.Exists(file) ? json.Deserialize<Dictionary<string,object>>(File.ReadAllText(file)) : null; } catch { return null; } }
     private static string ErrorText(string code) {
@@ -358,7 +422,7 @@ internal sealed class MainWindow : Form {
     }
     public void RenderPreview(string path) { ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; Location = new Point(-32000,-32000); Show(); Application.DoEvents(); using(Bitmap bitmap = new Bitmap(Width,Height)) { DrawToBitmap(bitmap,new Rectangle(0,0,Width,Height)); bitmap.Save(path); } Hide(); }
     public bool TestInvalidLink() { link.Text = "https://example.invalid/song/1"; StartDownload(this,EventArgs.Empty); return process == null && status.Text.StartsWith("链接无效"); }
-    public bool TestRememberChoiceIsExplicit() { vault.Save("SYNTHETIC_PERSISTED_LOGIN_ONLY");remember.Checked=false;StoreToken("SYNTHETIC_TEMPORARY_LOGIN_ONLY");bool ok=vault.Load()=="SYNTHETIC_PERSISTED_LOGIN_ONLY" && login.Text.Contains("旧加密登录仍保留") && remember.Text.Contains("不会删除已有登录");vault.Clear();sessionToken=null;return ok; }
+    public bool TestRememberChoiceIsExplicit() { vault.Save("SYNTHETIC_PERSISTED_LOGIN_ONLY");remember.Checked=false;StoreToken("SYNTHETIC_TEMPORARY_LOGIN_ONLY");bool ok=vault.Load()=="SYNTHETIC_PERSISTED_LOGIN_ONLY" && login.Text.Contains("旧加密登录仍保留") && remember.Text.Contains("下次保存");vault.Clear();sessionToken=null;return ok; }
 }
 
 internal static class Program {

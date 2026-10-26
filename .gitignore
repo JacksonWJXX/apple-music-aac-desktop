@@ -32,6 +32,7 @@ logs/
 *.dll
 *.so
 *.exe
+*.exe.config
 __pycache__/
 *.pyc
 build/

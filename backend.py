@@ -8,20 +8,26 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import threading
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from tool_core import ToolError, parse_song_url, publish_audio, safe_filename
+from transfer_progress import TransferProgress, downloader_progress
+
+STATUS_LOCK = threading.Lock()
 
 
 def status(job, phase, **safe_fields):
     value = {'phase': phase}
-    for key in ('title', 'artist', 'category', 'file', 'duration', 'bytes', 'codec'):
+    for key in ('title', 'artist', 'category', 'file', 'duration', 'bytes', 'codec',
+                'percent', 'bytes_done', 'bytes_total', 'fragments_done', 'fragments_total', 'estimated'):
         if key in safe_fields:
             value[key] = safe_fields[key]
-    temporary = job / 'status.new'
-    temporary.write_text(json.dumps(value, ensure_ascii=True), encoding='utf-8')
-    temporary.replace(job / 'status.json')
+    with STATUS_LOCK:
+        temporary = job / 'status.new'
+        temporary.write_text(json.dumps(value, ensure_ascii=True), encoding='utf-8')
+        temporary.replace(job / 'status.json')
 
 
 def validate_cookie(path):
@@ -99,12 +105,14 @@ async def real_download(job, canonical, song_id, ffmpeg):
 
     core.AppleMusicDownloader = SingleSongDownloader
     try:
-        errors = await core._download_urls_async(
-            urls=[canonical], cookies_path=job / 'cookies.txt', use_wrapper=False,
-            output_path=staging, temp_path=job / 'temp', ffmpeg_path=ffmpeg,
-            download_mode=DownloadMode.YTDLP, codec_song=SongCodec.AAC_WEB,
-            no_synced_lyrics=True, no_exceptions=True, log_level='INFO',
-            overwrite=False, audio_format=None, video_format=None)
+        reporter = TransferProgress(lambda phase, **fields: status(job, phase, **fields))
+        with downloader_progress(reporter):
+            errors = await core._download_urls_async(
+                urls=[canonical], cookies_path=job / 'cookies.txt', use_wrapper=False,
+                output_path=staging, temp_path=job / 'temp', ffmpeg_path=ffmpeg,
+                download_mode=DownloadMode.YTDLP, codec_song=SongCodec.AAC_WEB,
+                no_synced_lyrics=True, no_exceptions=True, log_level='INFO',
+                overwrite=False, audio_format=None, video_format=None)
     finally:
         core.AppleMusicDownloader = original
     if errors or not metadata:
