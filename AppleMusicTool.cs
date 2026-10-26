@@ -236,6 +236,8 @@ internal sealed class MainWindow : Form {
         status = LabelAt("准备就绪", 338, 551, 458, 34);
         progress = new ProgressBar(); progress.SetBounds(24, 608, 772, 7); progress.Style = ProgressBarStyle.Continuous; Controls.Add(progress);
         detail = LabelAt("只接受单曲，重名会自动避让，已有文件不会覆盖。", 24, 630, 772, 25); detail.ForeColor = Color.FromArgb(103,108,95);
+        card1.SendToBack();
+        card2.SendToBack();
         timer = new System.Windows.Forms.Timer(); timer.Interval = 250; timer.Tick += PollJob;
         FormClosing += ClosingWindow;
         Shown += delegate { CleanupStaleJobs(); };
